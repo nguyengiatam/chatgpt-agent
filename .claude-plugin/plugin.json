@@ -1,0 +1,18 @@
+{
+  "name": "chatgpt-agent",
+  "description": "Run read-only review and planning tasks in the ChatGPT web UI from Claude Code. ChatGPT reads the repo itself over a local bridge, so the diff never enters Claude's context and the reasoning is billed to web-chat quota. macOS and Microsoft Edge only.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Nguyễn Gia Tâm"
+  },
+  "homepage": "https://github.com/nguyengiatam/chatgpt-agent",
+  "repository": "https://github.com/nguyengiatam/chatgpt-agent",
+  "license": "MIT",
+  "keywords": [
+    "chatgpt",
+    "review",
+    "planning",
+    "delegation",
+    "macos"
+  ]
+}

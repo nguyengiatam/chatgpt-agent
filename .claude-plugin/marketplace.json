@@ -1,0 +1,18 @@
+{
+  "name": "chatgpt-agent-marketplace",
+  "description": "Marketplace for the chatgpt-agent plugin",
+  "owner": {
+    "name": "Nguyễn Gia Tâm"
+  },
+  "plugins": [
+    {
+      "name": "chatgpt-agent",
+      "description": "Run read-only review and planning tasks in the ChatGPT web UI from Claude Code. macOS and Microsoft Edge only.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "Nguyễn Gia Tâm"
+      }
+    }
+  ]
+}

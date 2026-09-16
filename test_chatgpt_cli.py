@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Tests for the pure-Python logic in chatgpt-cli.py (no browser needed)."""
+
+import importlib.util
+import io
+import json
+import os
+import shutil
+import subprocess
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_spec = importlib.util.spec_from_file_location("cgpt", os.path.join(_HERE, "chatgpt-cli.py"))
+cgpt = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cgpt)
+
+NODE = shutil.which("node")
+
+
+def _edge_tab_count():
+    """Number of tabs Edge reports, or None when it cannot be asked."""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", 'tell application "Microsoft Edge" to return (count of tabs of window 1)'],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip())
+    except ValueError:
+        return None
+
+
+EDGE_TABS = _edge_tab_count()
+
+
+class JsStringTest(unittest.TestCase):
+    """js_string() must turn any Python str into one safe JS string literal."""
+
+    def test_wraps_plain_text_in_quotes(self):
+        self.assertEqual(cgpt.js_string("hello"), '"hello"')
+
+    def test_escapes_double_quotes(self):
+        self.assertNotIn('"a"b"', cgpt.js_string('a"b'))
+
+    def test_escapes_backslash(self):
+        self.assertEqual(cgpt.js_string("a\\b"), '"a\\\\b"')
+
+    def test_newline_never_appears_literally(self):
+        # A raw newline inside a JS literal is a syntax error.
+        self.assertNotIn("\n", cgpt.js_string("line one\nline two"))
+
+    def test_non_ascii_is_escaped(self):
+        # osascript mangles non-ASCII bytes; force \uXXXX so it survives.
+        out = cgpt.js_string("cà phê \U0001f600")
+        self.assertTrue(all(ord(c) < 128 for c in out), out)
+
+    @unittest.skipUnless(NODE, "node not installed")
+    def test_round_trips_through_real_javascript(self):
+        nasty = 'He said "hi"\\ then\nnew line\ttab \'quote\' cà phê \U0001f600 ${x} `tick`'
+        literal = cgpt.js_string(nasty)
+        proc = subprocess.run(
+            [NODE, "-e", "process.stdout.write(JSON.stringify(" + literal + "))"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), nasty)
+
+
+class ParseTabsTest(unittest.TestCase):
+    """parse_tabs() reads the tab-separated rows the AppleScript bridge prints."""
+
+    def test_parses_window_tab_and_url(self):
+        self.assertEqual(
+            cgpt.parse_tabs("1\t2\thttps://example.com/"),
+            [(1, 2, "https://example.com/")],
+        )
+
+    def test_ignores_blank_lines(self):
+        raw = "1\t1\thttps://a.com/\n\n2\t3\thttps://b.com/\n"
+        self.assertEqual(len(cgpt.parse_tabs(raw)), 2)
+
+    def test_keeps_url_containing_tab_separator_characters(self):
+        raw = "1\t1\thttps://a.com/?x=1&y=2"
+        self.assertEqual(cgpt.parse_tabs(raw)[0][2], "https://a.com/?x=1&y=2")
+
+    def test_returns_empty_list_for_empty_output(self):
+        self.assertEqual(cgpt.parse_tabs(""), [])
+
+
+class FindChatgptTabTest(unittest.TestCase):
+    """find_chatgpt_tab() must match on host, not on a substring of the URL."""
+
+    def test_finds_chatgpt_com(self):
+        tabs = [(1, 1, "https://news.example.com/"), (1, 2, "https://chatgpt.com/c/abc")]
+        self.assertEqual(cgpt.find_chatgpt_tab(tabs), (1, 2))
+
+    def test_finds_legacy_chat_openai_com(self):
+        tabs = [(2, 5, "https://chat.openai.com/c/xyz")]
+        self.assertEqual(cgpt.find_chatgpt_tab(tabs), (2, 5))
+
+    def test_returns_first_match_so_conversation_is_reused(self):
+        tabs = [(1, 1, "https://chatgpt.com/c/first"), (1, 2, "https://chatgpt.com/c/second")]
+        self.assertEqual(cgpt.find_chatgpt_tab(tabs), (1, 1))
+
+    def test_returns_none_when_no_chatgpt_tab(self):
+        self.assertIsNone(cgpt.find_chatgpt_tab([(1, 1, "https://example.com/")]))
+
+    def test_does_not_match_other_host_mentioning_chatgpt_in_query(self):
+        tabs = [(1, 1, "https://evil.example.com/?redirect=https://chatgpt.com/")]
+        self.assertIsNone(cgpt.find_chatgpt_tab(tabs))
+
+    def test_does_not_match_lookalike_host(self):
+        self.assertIsNone(cgpt.find_chatgpt_tab([(1, 1, "https://notchatgpt.com/")]))
+
+
+class StabilityTrackerTest(unittest.TestCase):
+    """Completion needs our reply to exist and to have stopped growing.
+
+    `streaming` is a page-wide signal, so it only counts against us while our
+    reply is still the newest one - otherwise a second CLI run streaming into
+    the same tab would keep us waiting forever.
+    """
+
+    def tracker(self):
+        return cgpt.StabilityTracker(stable_polls=2)
+
+    def settle(self, tracker, text, found=True, streaming=False, is_last=True):
+        return tracker.update(found=found, streaming=streaming, is_last=is_last, text=text)
+
+    def test_not_done_while_our_reply_is_still_streaming(self):
+        t = self.tracker()
+        self.assertFalse(self.settle(t, "partial", streaming=True))
+        self.assertFalse(self.settle(t, "partial", streaming=True))
+
+    def test_not_done_before_our_reply_appears(self):
+        t = self.tracker()
+        self.assertFalse(self.settle(t, "", found=False))
+        self.assertFalse(self.settle(t, "", found=False))
+
+    def test_not_done_on_first_stable_observation(self):
+        t = self.tracker()
+        self.settle(t, "answer")
+        self.assertFalse(self.settle(t, "answer"))
+
+    def test_done_after_two_consecutive_identical_texts(self):
+        t = self.tracker()
+        self.settle(t, "answer")
+        self.settle(t, "answer")
+        self.assertTrue(self.settle(t, "answer"))
+
+    def test_growing_text_resets_stability(self):
+        t = self.tracker()
+        self.settle(t, "ans")
+        self.settle(t, "ans")
+        self.settle(t, "answer")
+        self.assertFalse(self.settle(t, "answer"))
+
+    def test_never_completes_on_empty_text(self):
+        t = self.tracker()
+        for _ in range(5):
+            self.assertFalse(self.settle(t, ""))
+
+    def test_streaming_midway_resets_stability(self):
+        t = self.tracker()
+        self.settle(t, "answer")
+        self.settle(t, "answer", streaming=True)
+        self.assertFalse(self.settle(t, "answer"))
+
+    def test_someone_elses_reply_streaming_after_ours_does_not_block_us(self):
+        t = self.tracker()
+        for _ in range(2):
+            self.settle(t, "our finished answer", streaming=True, is_last=False)
+        self.assertTrue(self.settle(t, "our finished answer", streaming=True, is_last=False))
+
+
+class ExplainErrorTest(unittest.TestCase):
+    """Bridge errors must stay actionable in any macOS display language.
+
+    Regression: matching the English phrase "turned off" made the
+    JavaScript-is-disabled hint vanish on a Vietnamese system.
+    """
+
+    VI_JS_OFF = (
+        "execution error: Microsoft Edge g\u1eb7p l\u1ed7i: Th\u1ef1c thi JavaScript "
+        "th\u00f4ng qua AppleScript \u0111\u00e3 b\u1ecb t\u1eaft. \u0110\u1ec3 b\u1eadt, "
+        "t\u1eeb thanh menu, h\u00e3y v\u00e0o m\u1ee5c Xem > Nh\u00e0 ph\u00e1t tri\u1ec3n. (12)"
+    )
+    EN_JS_OFF = (
+        "execution error: Microsoft Edge got an error: Executing JavaScript through "
+        "AppleScript is turned off. (12)"
+    )
+
+    def test_vietnamese_javascript_disabled_error_gives_the_enable_hint(self):
+        self.assertEqual(cgpt._explain(self.VI_JS_OFF), cgpt.ENABLE_HINT)
+
+    def test_english_javascript_disabled_error_gives_the_enable_hint(self):
+        self.assertEqual(cgpt._explain(self.EN_JS_OFF), cgpt.ENABLE_HINT)
+
+    def test_automation_denied_error_code_gives_the_automation_hint(self):
+        localised = "execution error: kh\u00f4ng \u0111\u01b0\u1ee3c ph\u00e9p. (-1743)"
+        self.assertEqual(cgpt._explain(localised), cgpt.AUTOMATION_HINT)
+
+    def test_app_not_running_error_code_is_recognised(self):
+        self.assertIn("not running", cgpt._explain("execution error: ... (-600)").lower())
+
+    def test_unknown_error_is_passed_through_verbatim(self):
+        self.assertIn("something else broke", cgpt._explain("something else broke (-42)"))
+
+
+@unittest.skipUnless(EDGE_TABS, "Microsoft Edge is not running with an open window")
+class BridgeIntegrationTest(unittest.TestCase):
+    """Runs the real AppleScript against the real Edge.
+
+    Unit tests cannot catch AppleScript name collisions: inside a `tell
+    application` block, a bare word is resolved against the app's dictionary
+    first. `mode` silently became an Edge property (error -1728) and `tab`
+    silently became Edge's tab CLASS, emitting the literal word "tab" as the
+    column separator. Both compiled cleanly. Only a real run exposes them.
+    """
+
+    def test_list_returns_one_parsable_row_per_open_tab(self):
+        tabs = cgpt.parse_tabs(cgpt.bridge("list"))
+        self.assertGreaterEqual(len(tabs), EDGE_TABS)
+
+    def test_rows_are_separated_by_real_tab_characters(self):
+        raw = cgpt.bridge("list")
+        self.assertIn("\t", raw)
+        self.assertNotRegex(raw, r"^\d+tab\d+tab")
+
+    def test_every_row_carries_a_plausible_url(self):
+        for _, _, url in cgpt.parse_tabs(cgpt.bridge("list")):
+            self.assertRegex(url, r"^[a-z][a-z0-9+.-]*:")
+
+    def test_loading_reports_a_known_state(self):
+        tabs = cgpt.parse_tabs(cgpt.bridge("list"))
+        window_index, tab_index, _ = tabs[0]
+        self.assertIn(cgpt.bridge("loading", window_index, tab_index), ("loading", "done"))
+
+
+class ReadPromptTest(unittest.TestCase):
+    """Argument words and piped stdin are both prompt material.
+
+    Regression: passing an instruction as an argument while piping content
+    silently discarded the pipe, so `git diff | chatgpt-cli.py "review this"`
+    asked ChatGPT to review nothing.
+    """
+
+    class Stdin(io.StringIO):
+        def __init__(self, data="", tty=False):
+            io.StringIO.__init__(self, data)
+            self._tty = tty
+
+        def isatty(self):
+            return self._tty
+
+    def test_words_only(self):
+        self.assertEqual(cgpt.read_prompt(["hello", "world"], self.Stdin(tty=True)), "hello world")
+
+    def test_piped_input_only(self):
+        self.assertEqual(cgpt.read_prompt([], self.Stdin("piped body")), "piped body")
+
+    def test_words_and_pipe_are_combined_with_the_instruction_first(self):
+        result = cgpt.read_prompt(["review", "this"], self.Stdin("diff --git a/x b/x"))
+        self.assertEqual(result, "review this\n\ndiff --git a/x b/x")
+
+    def test_nothing_given_on_a_terminal_yields_empty(self):
+        self.assertEqual(cgpt.read_prompt([], self.Stdin(tty=True)), "")
+
+    def test_empty_pipe_falls_back_to_the_words(self):
+        self.assertEqual(cgpt.read_prompt(["just", "this"], self.Stdin("   \n")), "just this")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
+
+class MakeMarkerTest(unittest.TestCase):
+    """The marker is what lets us find our own reply in a shared tab."""
+
+    def test_markers_are_unique(self):
+        self.assertNotEqual(cgpt.make_marker(), cgpt.make_marker())
+
+    def test_marker_survives_markdown_rendering(self):
+        # No backtick, asterisk or underscore: nothing the renderer would eat.
+        marker = cgpt.make_marker()
+        for char in "`*_#[]()":
+            if char in "[]":
+                continue
+            self.assertNotIn(char, marker)
+
+    def test_marker_is_short_enough_to_stay_out_of_the_way(self):
+        self.assertLess(len(cgpt.make_marker()), 20)

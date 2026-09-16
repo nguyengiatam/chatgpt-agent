@@ -1,4 +1,6 @@
-# chatgpt-cli
+# ChatGPT Agent
+
+*(repository `chatgpt-agent`; the shell tool inside it is `chatgpt-cli.py`)*
 
 Talk to the **ChatGPT web UI** from the shell, through the Microsoft Edge
 window you are already signed in to. Built for accounts that browser-automation
@@ -16,12 +18,25 @@ clipboard, and cannot type into the wrong tab.
 
 ## Install as a Claude Code plugin
 
+Source: **https://github.com/nguyengiatam/chatgpt-agent** — worth reading first,
+since a plugin runs on your machine.
+
 ```
-/plugin marketplace add nguyengiatam/chatgpt-agent
+/plugin marketplace add https://github.com/nguyengiatam/chatgpt-agent.git
 /plugin install chatgpt-agent@chatgpt-agent-marketplace
 ```
 
-Then `/chatgpt-agent:doctor` before anything else.
+The GitHub shorthand works too, and pins to a tag if you want one:
+
+```
+/plugin marketplace add nguyengiatam/chatgpt-agent
+/plugin marketplace add nguyengiatam/chatgpt-agent@v0.2.5
+```
+
+Then `/chatgpt-agent:doctor` before anything else — this plugin has more hard
+requirements than most, and the doctor names whichever one is missing.
+
+To update later: `/plugin marketplace update chatgpt-agent-marketplace`.
 
 | Command | Purpose |
 |---|---|
@@ -128,11 +143,14 @@ backslashes, backticks, `${...}`, newlines and emoji all survive intact.
 ## Testing
 
 ```bash
-python3 test_chatgpt_cli.py   # 32 tests
-node --test test_chatgpt_dom.js   # 20 tests
+node test_chatgpt_dom.js
+python3 -m unittest discover -p 'test_*.py' < /dev/null
 ```
 
-Four of the Python tests drive the real AppleScript against a running Edge, and
+`< /dev/null` matters: one test reads real stdin, so without a terminal and
+without a redirect the suite waits for input that never comes.
+
+Some of the Python tests drive the real AppleScript against a running Edge, and
 skip when Edge has no open window. They are not optional extras: AppleScript
 name collisions cannot be caught any other way. Inside a `tell application`
 block a bare word is resolved against the **app's dictionary first**, so a

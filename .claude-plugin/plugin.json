@@ -1,5 +1,6 @@
 {
   "name": "chatgpt-agent",
+  "displayName": "ChatGPT Agent",
   "description": "Run review and planning tasks in the ChatGPT web UI from Claude Code. ChatGPT reads the repo itself over a local bridge, so the diff never enters Claude's context and the reasoning is billed to web-chat quota. Read-only by default; --allow-shell opts in to running commands. macOS and Microsoft Edge only.",
   "version": "0.2.5",
   "author": {

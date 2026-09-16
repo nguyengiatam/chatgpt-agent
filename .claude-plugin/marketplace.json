@@ -7,12 +7,22 @@
   "plugins": [
     {
       "name": "chatgpt-agent",
+      "displayName": "ChatGPT Agent",
       "description": "Run review and planning tasks in the ChatGPT web UI from Claude Code. Read-only by default; --allow-shell opts in to running commands. macOS and Microsoft Edge only.",
-      "version": "0.2.5",
+      "category": "development",
       "source": "./",
+      "version": "0.2.5",
       "author": {
         "name": "Nguyễn Gia Tâm"
-      }
+      },
+      "homepage": "https://github.com/nguyengiatam/chatgpt-agent",
+      "keywords": [
+        "chatgpt",
+        "code-review",
+        "planning",
+        "macos",
+        "applescript"
+      ]
     }
   ]
 }

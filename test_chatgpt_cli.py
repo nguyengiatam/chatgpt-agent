@@ -278,6 +278,56 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 
 
+class NeedsAttachmentTest(unittest.TestCase):
+    """Typing cost is quadratic in NEWLINES, not in characters.
+
+    Measured against the live composer, same 40k characters throughout:
+    1 line 0.1s, 50 lines 0.5s, 200 lines 2.4s, 700 lines 16.7s,
+    2000 lines 116.3s. Each newline is another ProseMirror block node in a
+    single transaction. So the threshold that matters is the line count, and a
+    rule written against length alone would have let the worst case straight
+    through.
+    """
+
+    def test_a_short_prompt_is_typed(self):
+        self.assertFalse(cgpt.needs_attachment("review this diff"))
+
+    def test_a_long_single_line_is_still_typed(self):
+        # 60k on one line inserted in 0.1s; length alone is not the problem.
+        self.assertFalse(cgpt.needs_attachment("x" * 60000))
+
+    def test_many_short_lines_are_attached(self):
+        self.assertTrue(cgpt.needs_attachment("\n".join("line" for _ in range(2000))))
+
+    def test_the_threshold_sits_below_the_painful_range(self):
+        self.assertLess(cgpt.ATTACH_LINES, 200)
+
+    def test_just_under_the_line_threshold_is_typed(self):
+        self.assertFalse(cgpt.needs_attachment("\n".join("a" for _ in range(cgpt.ATTACH_LINES - 1))))
+
+    def test_just_over_the_line_threshold_is_attached(self):
+        self.assertTrue(cgpt.needs_attachment("\n".join("a" for _ in range(cgpt.ATTACH_LINES + 2))))
+
+    def test_an_enormous_single_line_still_attaches_on_size(self):
+        self.assertTrue(cgpt.needs_attachment("x" * (cgpt.ATTACH_CHARS + 1)))
+
+    def test_empty_text_is_typed(self):
+        self.assertFalse(cgpt.needs_attachment(""))
+        self.assertFalse(cgpt.needs_attachment(None))
+
+
+class AttachmentNameTest(unittest.TestCase):
+    def test_the_name_is_derived_from_the_marker(self):
+        name = cgpt.attachment_name("[c2c:abcd1234]")
+        self.assertIn("abcd1234", name)
+
+    def test_the_name_ends_in_txt(self):
+        self.assertTrue(cgpt.attachment_name("[c2c:abcd1234]").endswith(".txt"))
+
+    def test_the_name_has_no_path_separators(self):
+        self.assertNotIn("/", cgpt.attachment_name("[c2c:../../etc]"))
+
+
 class MakeMarkerTest(unittest.TestCase):
     """The marker is what lets us find our own reply in a shared tab."""
 

@@ -307,6 +307,12 @@ def run(args, log, progress):
     for round_number in range(first_round, args.max_rounds + 1):
         if reply is None:
             log("round " + str(round_number) + "/" + str(args.max_rounds) + " - asking ChatGPT")
+            if cgpt.needs_attachment(message):
+                # Worth saying out loud. Nothing is written to this machine, but
+                # the upload lives in the ChatGPT conversation from here on, and
+                # deleting that conversation is what clears it.
+                log("  " + str(message.count("\n") + 1) + " lines is too wide to "
+                    "type - sending as an attachment, which stays in the conversation")
             marker = attempt("send", args.retries, log,
                              lambda: cgpt.send(window, tab, message))
             # Checkpoint before waiting: this is the window a crash lands in.

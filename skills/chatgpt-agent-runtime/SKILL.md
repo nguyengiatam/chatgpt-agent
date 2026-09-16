@@ -96,6 +96,18 @@ run them, then feed the results back with `--session` for the verdict. Not for
 safety, but because the party being gated should not also be the party holding
 the evidence. The `go test` output is then a record anyone can re-check.
 
+## Attachments
+
+A turn wider than 120 lines is uploaded as a `.txt` rather than typed, because
+composer insertion costs quadratic time in newlines — the same 40k characters
+took 0.1s on one line and 116.3s across two thousand, which freezes the tab.
+The progress log says when this happens.
+
+Nothing lands on the local disk. The upload does stay in the ChatGPT
+conversation, so a long run leaves several files in the account; deleting that
+conversation removes them, which is a reason to give related work one
+`--session`.
+
 ## Reading the result
 
 Return ChatGPT's answer verbatim. It is a second opinion from a different

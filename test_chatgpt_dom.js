@@ -226,3 +226,45 @@ test("a different marker does not match", () => {
 test("an empty anchor matches nothing rather than everything", () => {
   assert.strictEqual(pick([U("anything"), A("reply")], ""), null);
 });
+
+test("a missing send button counts as blocked", () => {
+  assert.strictEqual(CGPT.sendBlocked(null), true);
+});
+
+test("the DOM disabled property blocks", () => {
+  assert.strictEqual(CGPT.sendBlocked({ disabled: true, getAttribute: () => null }), true);
+});
+
+test("aria-disabled blocks even while the DOM property says otherwise", () => {
+  // This is the real case: ChatGPT leaves .disabled false during an upload and
+  // marks the button aria-disabled="true". Reading only .disabled clicked a
+  // dead button and reported success.
+  assert.strictEqual(CGPT.sendBlocked({ disabled: false, getAttribute: () => "true" }), true);
+});
+
+test("aria-disabled false does not block", () => {
+  assert.strictEqual(CGPT.sendBlocked({ disabled: false, getAttribute: () => "false" }), false);
+});
+
+test("a button with no aria-disabled attribute does not block", () => {
+  assert.strictEqual(CGPT.sendBlocked({ disabled: false, getAttribute: () => null }), false);
+});
+
+test("a file-citation chip is not rendered into the answer", () => {
+  // Shape observed live: BUTTON > SPAN > P holding the attachment's name.
+  const body = el("div", [
+    el("p", ["The fence blocks traversal."]),
+    el("button", [el("p", ["c2c-8fd3427b +1"])]),
+    el("p", ["It is not a sandbox."]),
+  ]);
+  const out = md(body);
+  assert.ok(!out.includes("c2c-8fd3427b"), out);
+  assert.ok(out.includes("The fence blocks traversal."));
+  assert.ok(out.includes("It is not a sandbox."));
+});
+
+test("a copy caption on a code block is not rendered either", () => {
+  const out = md(el("div", [el("button", ["Sao chép"]), el("p", ["real text"])]));
+  assert.ok(!out.includes("Sao chép"), out);
+  assert.ok(out.includes("real text"));
+});

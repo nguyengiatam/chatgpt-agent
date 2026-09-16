@@ -201,11 +201,66 @@ def make_marker():
     return "[c2c:" + uuid.uuid4().hex[:8] + "]"
 
 
+ATTACH_LINES = 120
+# 60,000 characters on a single line was measured at 0.1s, so the size guard
+# sits above that: it is there for territory nobody has measured, not for a
+# case known to be fine. The line rule below is the one that does the work.
+ATTACH_CHARS = 80000
+ATTACH_WAIT = 90.0
+
+ATTACHED_NOTE = (
+    "Everything for this turn is in the attached file {name}. It went as a file "
+    "because pasting it would stall the page. Open it and continue exactly as if "
+    "its contents had been typed here."
+)
+
+
+def needs_attachment(text):
+    """True when typing `text` would make the composer crawl.
+
+    The cost of execCommand("insertText") is quadratic in NEWLINES, not in
+    characters: ProseMirror builds one block node per line inside a single
+    transaction. Measured on the live composer with the same 40,000 characters
+    throughout - 1 line 0.1s, 50 lines 0.5s, 200 lines 2.4s, 700 lines 16.7s,
+    2000 lines 116.3s.
+
+    So the line count is the test that matters. The character ceiling is a
+    second guard for the rare single enormous line.
+    """
+    text = text or ""
+    return text.count("\n") + 1 > ATTACH_LINES or len(text) > ATTACH_CHARS
+
+
+def attachment_name(marker):
+    """A filename derived from the marker, with nothing path-like left in it."""
+    tag = "".join(ch for ch in str(marker) if ch.isalnum()) or "payload"
+    return "c2c-" + tag[-8:] + ".txt"
+
+
 def send(window_index, tab_index, prompt):
-    """Type and submit `prompt`, returning the marker that identifies it."""
+    """Type and submit `prompt`, returning the marker that identifies it.
+
+    A payload too wide to type is uploaded instead; the marker is always typed,
+    since that is what locates our reply afterwards.
+    """
     marker = make_marker()
-    prompt = marker + "\n\n" + prompt
-    result = eval_js(window_index, tab_index, "CGPT.insert(" + js_string(prompt) + ")")
+    attached = needs_attachment(prompt)
+
+    if attached:
+        name = attachment_name(marker)
+        result = eval_js(
+            window_index, tab_index,
+            "CGPT.attach(" + js_string(prompt) + ", " + js_string(name) + ")",
+        )
+        if not result.get("ok"):
+            raise CliError(
+                "Could not attach this turn's data (" + str(result.get("error")) + ")."
+            )
+        typed = marker + "\n\n" + ATTACHED_NOTE.format(name=name)
+    else:
+        typed = marker + "\n\n" + prompt
+
+    result = eval_js(window_index, tab_index, "CGPT.insert(" + js_string(typed) + ")")
     if not result.get("ok"):
         raise CliError(
             "Could not type into the ChatGPT composer (" + str(result.get("error")) + ").\n"
@@ -213,9 +268,16 @@ def send(window_index, tab_index, prompt):
             "Cloudflare page."
         )
 
-    # React enables the send button a tick after the input event lands.
-    for delay in (0.4, 1.0, 2.0):
-        time.sleep(delay)
+    # React enables the send button a tick after the input event lands, and an
+    # upload has to finish before it will accept the turn at all.
+    deadline = time.time() + (ATTACH_WAIT if attached else 4.0)
+    result = {}
+    while time.time() < deadline:
+        time.sleep(0.4)
+        if attached and not eval_js(
+            window_index, tab_index, "CGPT.attachmentReady()"
+        ).get("ready"):
+            continue
         result = eval_js(window_index, tab_index, "CGPT.submit()")
         if result.get("ok"):
             return marker

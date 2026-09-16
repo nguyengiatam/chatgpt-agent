@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.1
+
+**Fixed: a wide payload froze the ChatGPT tab.** Reported from the first real
+run. Insertion cost is quadratic in NEWLINES, not characters — measured on the
+live composer with 40,000 characters throughout: 1 line 0.1s, 200 lines 2.4s,
+700 lines 16.7s, 2000 lines 116.3s. ProseMirror builds one block node per line
+in a single transaction. Payloads over 120 lines now upload as a `.txt` and the
+composer gets a pointer; the same 3000-line payload attaches in 0.1s.
+
+**Fixed: `submit()` could click a dead button and report success.** ChatGPT
+disables the send button with `aria-disabled`, while the DOM `disabled` property
+stays `false` throughout — including for the seconds an upload takes. Reading
+only `disabled` meant clicking a button React considered dead: the composer
+cleared, nothing sent. This was silently wrong beyond attachments.
+
+**Fixed: file-citation chips leaked into answers.** With an attachment in the
+turn, ChatGPT renders citation buttons inside its reply, and the DOM-to-Markdown
+pass pulled their text into the middle of sentences. Buttons are now skipped;
+they are always chrome, never prose.
+
+**Removed a fallback that never worked.** `insert()` fell back to a synthetic
+`ClipboardEvent` when `execCommand` failed. Measured: it returns in 0.1s and
+leaves the composer empty, because ProseMirror ignores an untrusted paste. It
+looked like a safety net and caught nothing.
+
+Attachments stay in the ChatGPT conversation, not on your machine. See
+"Large payloads go as attachments" in the README for what that means for
+cleanup.
+
 ## 0.2.0
 
 **`--allow-shell`, off by default.** Some questions cannot be answered by

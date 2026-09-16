@@ -322,6 +322,40 @@ Safari is a separate implementation, not a flag: it uses `do JavaScript in
 document`, different syntax entirely. Firefox has no AppleScript scripting and
 never will.
 
+## Large payloads go as attachments
+
+Typing into the ChatGPT composer costs time **quadratic in the number of
+newlines**, not in characters. Measured on the live composer with the same
+40,000 characters throughout:
+
+| lines | insert time |
+|---|---|
+| 1 | 0.1s |
+| 50 | 0.5s |
+| 200 | 2.4s |
+| 700 | 16.7s |
+| 2000 | 116.3s |
+
+`execCommand("insertText")` makes ProseMirror build one block node per line
+inside a single transaction. A file listing or a diff is the worst possible
+shape, and a big one freezes the tab outright. So above 120 lines the payload is
+uploaded as a `.txt` instead and the composer gets a one-line pointer. The same
+3000-line payload that would take three minutes to type attaches in 0.1s.
+
+**Nothing is written to this machine.** The file is built in the page from data
+already in memory; there is no temp file to clean up locally.
+
+**The upload does persist in your ChatGPT account.** It belongs to the
+conversation it was sent in, and stays there. A run that attaches on four rounds
+leaves four files, and repeated names get numbered — `c2c-8fd3427b(3).txt`.
+Deleting the conversation takes its attachments with it, which is the argument
+for `--session`: everything a project uploads stays in one conversation you can
+delete in one action. `--forget` only drops this tool's bookmark; it does not
+touch anything in ChatGPT.
+
+The threshold is `ATTACH_LINES` in `chatgpt-cli.py`. Raising it means fewer
+uploads and slower turns; the table above is the trade.
+
 ## When a run is interrupted
 
 Everything served stays in the ChatGPT conversation forever, so the run has two

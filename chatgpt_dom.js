@@ -16,6 +16,7 @@
       'button[data-testid="send-button"], button[data-testid="composer-send-button"], button[aria-label*="Send"]',
     stopButton: 'button[data-testid="stop-button"], button[aria-label*="Stop"]',
     assistantMessage: '[data-message-author-role="assistant"]',
+    fileInput: 'input#upload-files, input[type="file"]:not([accept*="image"])',
     markdownBody: ".markdown, .prose",
   };
 
@@ -102,6 +103,12 @@
     if (node.nodeType !== 1) return "";
 
     var tag = node.tagName;
+
+    // Buttons inside an assistant message are always chrome, never prose: the
+    // Copy and Run captions on a code block, and the file-citation chips that
+    // appear whenever the turn carried an attachment. Left in, a citation like
+    // "c2c-8fd3427b +1" lands in the middle of a sentence in the answer.
+    if (tag === "BUTTON") return "";
 
     if (tag === "PRE") {
       // The code element skips ChatGPT's language label and "Copy code" button.
@@ -214,33 +221,65 @@
     sel.removeAllRanges();
     sel.addRange(range);
 
+    // execCommand('insertText') emits the real beforeinput/input sequence that
+    // ProseMirror listens for; assigning .value to a contenteditable does
+    // nothing. There is no fallback here on purpose: a synthetic ClipboardEvent
+    // was measured returning in 0.1s while leaving the composer empty, because
+    // ProseMirror ignores an untrusted paste. Keeping it would have looked like
+    // a safety net and caught nothing.
     var wrote = false;
     try {
       wrote = document.execCommand("insertText", false, text);
     } catch (e) {
-      wrote = false;
+      return { ok: false, error: "insert-failed: " + e.message };
     }
+    if (!wrote && text) return { ok: false, error: "insert-rejected" };
+    return { ok: !text || !!box.textContent, error: null };
+  }
 
-    if (!wrote || !box.textContent) {
-      try {
-        var dt = new DataTransfer();
-        dt.setData("text/plain", text);
-        box.dispatchEvent(
-          new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true })
-        );
-      } catch (e) {
-        return { ok: false, error: "insert-failed: " + e.message };
-      }
+  // Attaching sidesteps the composer entirely, and that is the whole point.
+  // execCommand("insertText") builds one ProseMirror block node per newline in
+  // a single transaction, so the cost is quadratic in LINES: the same 40k
+  // characters took 0.1s on one line and 116s across two thousand. A file
+  // reaches the same content into the conversation in 0.1s regardless.
+  function attach(content, name) {
+    var input = document.querySelector(SELECTORS.fileInput);
+    if (!input) return { ok: false, error: "file-input-not-found" };
+    try {
+      var transfer = new DataTransfer();
+      transfer.items.add(new File([content], name, { type: "text/plain" }));
+      input.files = transfer.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return { ok: input.files.length === 1, bytes: (content || "").length, error: null };
+    } catch (e) {
+      return { ok: false, error: "attach-failed: " + e.message };
     }
-    return { ok: !!box.textContent, error: box.textContent ? null : "composer-still-empty" };
+  }
+
+  // ChatGPT blocks the send button with aria-disabled, not with the DOM
+  // `disabled` property - that one stays false throughout. Measured while a
+  // file uploaded: disabled=false the entire time, aria-disabled "false" ->
+  // "true" -> "false" as the upload finished. Reading only `disabled` meant
+  // clicking a button React considered dead, reporting success, and sending
+  // nothing.
+  function sendBlocked(button) {
+    if (!button) return true;
+    if (button.disabled) return true;
+    return button.getAttribute("aria-disabled") === "true";
   }
 
   function submit() {
     var btn = document.querySelector(SELECTORS.sendButton);
     if (!btn) return { ok: false, error: "send-button-not-found" };
-    if (btn.disabled) return { ok: false, error: "send-button-disabled" };
+    if (sendBlocked(btn)) return { ok: false, error: "send-button-disabled" };
     btn.click();
     return { ok: true, error: null };
+  }
+
+  // True once an upload has settled and the composer will accept the turn.
+  function attachmentReady() {
+    var btn = document.querySelector(SELECTORS.sendButton);
+    return { ok: true, ready: !sendBlocked(btn) };
   }
 
   // One poll sample: everything the Python side needs to decide "is it done?".
@@ -271,6 +310,9 @@
     pickReply: pickReply,
     probe: probe,
     insert: insert,
+    attach: attach,
+    attachmentReady: attachmentReady,
+    sendBlocked: sendBlocked,
     submit: submit,
     state: state,
   };

@@ -125,6 +125,21 @@ class WriteModeTest(unittest.TestCase):
         self.assertIsNone(plain.preset)
         self.assertFalse(plain.write)
 
+    def test_the_data_budget_is_unset_until_the_mode_is_known(self):
+        # A review budget spent inside four rounds is how an implement run died
+        # before it reached an edit, so --write has to be able to raise it.
+        parsed = agent.build_parser().parse_args(["--write", "x"])
+        self.assertIsNone(parsed.max_chars)
+        self.assertIsNone(parsed.round_chars)
+        self.assertGreater(agent.WRITE_RUN_CHARS, agent.RUN_CHARS)
+        self.assertGreater(agent.WRITE_ROUND_CHARS, agent.ROUND_CHARS)
+
+    def test_an_exhausted_write_run_is_told_to_describe_the_worktree(self):
+        # "Conclude with what you have" is review language; an implement run
+        # that concludes without saying what it left behind loses the work.
+        self.assertIn("worktree", agent.DATA_SPENT_WRITE)
+        self.assertIn("Do not claim the task is done", agent.DATA_SPENT_WRITE)
+
     def test_an_implement_preset_ships_with_the_plugin(self):
         body = agent.load_preset("implement")
         self.assertIn("commit", body.lower())

@@ -127,10 +127,18 @@ def _run(root, argv, ok_codes=(0,)):
 
     `ok_codes` exists for ripgrep, which exits 1 to mean "searched fine, found
     nothing" - a result, not a failure.
+
+    stdin is closed, and that is load-bearing rather than tidy. ripgrep with a
+    non-tty stdin searches *stdin* instead of the path it was given, so a run
+    whose own task arrived on stdin - the documented way to pass a long one -
+    had every `search` come back "no matches" with no error anywhere. Any child
+    that reads stdin would be wrong here for the same reason: this process owns
+    that pipe.
     """
     try:
         proc = subprocess.run(
-            argv, cwd=root, capture_output=True, text=True, errors="replace"
+            argv, cwd=root, capture_output=True, text=True, errors="replace",
+            stdin=subprocess.DEVNULL,
         )
     except OSError as exc:
         return False, str(exc)
@@ -239,6 +247,10 @@ def _op_shell(root, op, limit, role="review"):
         proc = subprocess.run(
             str(cmd), shell=True, cwd=cwd, capture_output=True,
             text=True, errors="replace", timeout=seconds,
+            # Same reason as _run: this process owns stdin. A command that
+            # reads it would eat the caller's task, and one that waits on it
+            # would hang until the timeout.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         raise OpError("timed out after " + str(seconds) + "s: " + str(cmd))

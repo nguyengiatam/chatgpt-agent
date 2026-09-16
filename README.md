@@ -1,20 +1,46 @@
 # ChatGPT Agent
 
-*(repository `chatgpt-agent`; the shell tool inside it is `chatgpt-cli.py`)*
+Delegate work to the **ChatGPT web UI** from the shell or from Claude Code,
+through the Microsoft Edge window you are already signed in to. Built for
+accounts that browser-automation tools cannot log in to.
 
-Talk to the **ChatGPT web UI** from the shell, through the Microsoft Edge
-window you are already signed in to. Built for accounts that browser-automation
-tools (Playwright, Selenium, headless Chrome) cannot log in to.
+ChatGPT asks for what it needs and this side serves it, so the repository never
+has to be pasted into a prompt: the diff stays out of the calling agent's
+context, and the reasoning is billed to web-chat quota rather than to the agent.
 
-It drives the page with Edge's AppleScript `execute javascript` command — not
-by synthesising keystrokes — so it never needs window focus, never touches your
-clipboard, and cannot type into the wrong tab.
+It drives the page with Edge's AppleScript `execute javascript` — not synthetic
+keystrokes — so it never needs window focus, never touches your clipboard, and
+cannot type into the wrong tab.
 
-> **macOS only.** This drives Microsoft Edge through Apple Events. There is no
-> Linux or Windows equivalent, and no other browser is supported — Chrome and
-> Safari both fail, for different reasons documented below. Edge must be
-> running and already signed in to ChatGPT, and two permissions must be granted
-> by hand. Run `python3 scripts/doctor.py` to check all of it at once.
+> **macOS + Microsoft Edge only.** Apple Events have no Linux or Windows
+> equivalent, and Chrome and Safari each fail for their own reasons (see
+> [docs/internals.md](docs/internals.md)). Edge must be running and signed in to
+> ChatGPT, and two permissions must be granted by hand.
+
+## Three things it does
+
+| | What | Reads the repo | Writes to it |
+|---|---|---|---|
+| **ask** | a one-shot question | no | no |
+| **review** / **plan** | judge a diff, or write an implementation plan | yes | no |
+| **implement** | carry out a change and commit it | yes | **yes** |
+
+```bash
+./chatgpt-cli.py "explain this regex: ^\d{3}-\d{4}$"        # ask
+./chatgpt-agent.py --preset review "Review the uncommitted change."
+./chatgpt-agent.py --write "Implement docs/plans/retry.md on this branch."
+```
+
+A run reports its rounds on stderr and the answer on stdout:
+
+```
+workspace: /Users/me/code/app (write)
+  on branch add-retry at 9f2c1a4, worktree clean
+  Node project; dependencies are installed at <root>/node_modules
+  data budget: 700000 chars, 120000 per round
+round 1/24 - asking ChatGPT
+  served 3 op(s): git_diff, read, search        [11482/700000 chars]
+```
 
 ## Install as a Claude Code plugin
 
@@ -26,22 +52,15 @@ since a plugin runs on your machine.
 /plugin install chatgpt-agent@chatgpt-agent-marketplace
 ```
 
-The GitHub shorthand works too, and pins to a tag if you want one:
-
-```
-/plugin marketplace add nguyengiatam/chatgpt-agent
-/plugin marketplace add nguyengiatam/chatgpt-agent@v0.2.5
-```
-
 Then `/chatgpt-agent:doctor` before anything else — this plugin has more hard
-requirements than most, and the doctor names whichever one is missing.
-
-To update later: `/plugin marketplace update chatgpt-agent-marketplace`.
+requirements than most, and the doctor names whichever one is missing. To
+update later: `/plugin marketplace update chatgpt-agent-marketplace`.
 
 | Command | Purpose |
 |---|---|
 | `/chatgpt-agent:review` | review a diff, branch or working tree |
 | `/chatgpt-agent:plan` | write an implementation plan |
+| `/chatgpt-agent:implement` | carry out a change and commit it |
 | `/chatgpt-agent:ask` | one-shot question, no repository access |
 | `/chatgpt-agent:doctor` | check the prerequisites |
 | `/chatgpt-agent:sessions` | list or forget saved conversations |
@@ -49,271 +68,21 @@ To update later: `/plugin marketplace update chatgpt-agent-marketplace`.
 The `chatgpt-reviewer` agent forwards the same thing from a subagent when the
 main thread should not spend context on it.
 
-### Examples
-
-Review what is uncommitted, in the repository you are in:
-
-```
-/chatgpt-agent:review Review the uncommitted change.
-```
-
-ChatGPT asks for what it needs and this side serves it. A typical run:
-
-```
-round 1/8 - asking ChatGPT
-  served 1 op(s): git_diff                          [239/250000 chars]
-round 2/8 - asking ChatGPT
-  served 5 op(s): read, search, search, search, list  [36749/250000 chars]
-round 3/8 - asking ChatGPT
-  served 4 op(s): read, read, list, search           [42104/250000 chars]
-round 4/8 - asking ChatGPT
-### Findings
-
-**Blocking — `src/pay.py:3-4` / `src/checkout.py:5`**
-`fee()` now returns `None` for `amount <= 0`, while `total()` always computes
-`base + fee(base)`. So `total(0)` raises `TypeError` instead of returning a
-number. **Fix:** keep `fee()` numeric, or make `total()` handle the no-fee case.
-...
-**Verdict: NEEDS WORK — 1 blocking finding.**
-```
-
-Rounds 2 and 3 are the point: it searched for the callers of the changed
-function and read them. A review of the diff alone would not have found that.
-
-Review a branch, in another repository, and keep the answer:
-
-```
-/chatgpt-agent:review --workspace ~/code/app --out review.md Review main..HEAD.
-```
-
-Plan a change, reusing one conversation so ChatGPT keeps what it already learned
-about the project:
-
-```
-/chatgpt-agent:plan --session app Add retry with backoff to the ingest worker.
-```
-
-Ask something that needs no repository access at all:
-
-```
-/chatgpt-agent:ask Explain the difference between a rebase and a merge commit.
-```
-
-Answer a question reading cannot answer — does the suite actually catch this? —
-by letting ChatGPT work in a copy and run the tests there:
-
-```
-/chatgpt-agent:review --allow-shell Copy the repo to /tmp/mt, flip the
-comparison on line 47 there, run the tests, and tell me whether they went red.
-```
-
-Every command it runs is printed before it runs. The flag is off unless you
-pass it, and no command in this plugin passes it for you.
-
-Same thing from the shell, without Claude Code:
-
-```bash
-python3 chatgpt-agent.py --preset review --workspace ~/code/app "Review main..HEAD."
-```
-
-## Requirements
+## Requirements and setup
 
 - macOS, Microsoft Edge, signed in to ChatGPT
-- Python 3 (standard library only — nothing to install)
-- Node is needed only to run the JavaScript tests
+- Python 3 — standard library only, nothing to install
+- Node only if you want to run the JavaScript tests
 
-## Setup
-
-One toggle, once. In Edge's menu bar:
+One toggle, once, in Edge's menu bar:
 
 **View › Developer › Allow JavaScript from Apple Events**
 
-Without it Edge refuses the injection and the tool tells you so. macOS will
-also ask, on first run, to let your terminal control Edge — accept it, or set
-it later under *System Settings › Privacy & Security › Automation*.
+Without it Edge refuses the injection and the tool says so. macOS will also ask,
+on first run, to let your terminal control Edge — accept it, or set it later
+under *System Settings › Privacy & Security › Automation*.
 
-Optional shortcut:
-
-```bash
-echo 'alias gpt="~/workspace/AI-Plugins/chatgpt-cli/chatgpt-cli.py"' >> ~/.zshrc
-```
-
-## Usage
-
-```bash
-./chatgpt-cli.py "explain this regex: ^\d{3}-\d{4}$"
-cat notes.md | ./chatgpt-cli.py
-git diff | ./chatgpt-cli.py "review this diff"
-./chatgpt-cli.py "write a bash one-liner" > answer.md
-```
-
-The reply is printed as Markdown, with fenced code blocks and their language,
-once ChatGPT has finished writing it.
-
-Arguments and piped input are **both** prompt material. Given both, the
-arguments become the instruction and the piped content follows after a blank
-line — so the third example above sends the instruction *and* the diff.
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--timeout` | `180` | Seconds to wait for a reply |
-| `--poll` | `1.0` | Seconds between checks |
-| `--focus` | off | Switch Edge to the ChatGPT tab; background tabs can render slowly |
-
-These defaults live in the `argparse` setup at the bottom of `chatgpt-cli.py`;
-`--help` lists the flags but not their values.
-
-Exit codes: `0` success, `1` an explained failure on stderr, `2` a usage
-error such as an empty prompt, `130` interrupted.
-
-### Conversation handling
-
-The first open `chatgpt.com` tab is reused, so replies keep the context of that
-conversation. If no such tab exists, one is opened. Switch conversations, or
-start a fresh one, in the browser as usual — the CLI follows whatever that tab
-is showing.
-
-## How it works
-
-```
-chatgpt-cli.py ──argv──> chatgpt_bridge.applescript ──> Microsoft Edge
-                                                            │
-                          chatgpt_dom.js ──injected────────>┘
-```
-
-| File | Role |
-|---|---|
-| `chatgpt-cli.py` | CLI, tab discovery, poll loop, error messages |
-| `chatgpt_bridge.applescript` | Fixed bridge to Edge; every dynamic value arrives via `argv` |
-| `chatgpt_dom.js` | Runs in the page: fills the composer, reads the reply, converts DOM to Markdown |
-
-A run is: find the ChatGPT tab → check the composer exists → insert the prompt →
-click Send → poll until done → print Markdown.
-
-**The reply is found by anchoring on our own prompt**, not by taking the newest
-assistant message. The tab is shared: you may type in it yourself, and a second
-CLI run can land between our send and our read. Matching the user message whose
-text equals the prompt we just sent, then reading the assistant message after
-it, is what keeps someone else's answer from being printed as ours.
-
-**Completion needs the reply to exist and to stop growing** for two consecutive
-polls. The stop button is page-wide, so it only counts against us while our
-reply is still the newest message — otherwise another run streaming into the
-same tab would block us forever.
-
-**The prompt is never interpolated into script source.** It crosses three
-quoting layers (shell → AppleScript → JavaScript), so it is encoded once with
-`json.dumps` into a JavaScript string literal and passed as an `argv` item;
-`subprocess` is called with an argument list, never a shell string. Quotes,
-backslashes, backticks, `${...}`, newlines and emoji all survive intact.
-
-## Testing
-
-```bash
-node test_chatgpt_dom.js
-python3 -m unittest discover -p 'test_*.py' < /dev/null
-```
-
-`< /dev/null` matters: one test reads real stdin, so without a terminal and
-without a redirect the suite waits for input that never comes.
-
-Some of the Python tests drive the real AppleScript against a running Edge, and
-skip when Edge has no open window. They are not optional extras: AppleScript
-name collisions cannot be caught any other way. Inside a `tell application`
-block a bare word is resolved against the **app's dictionary first**, so a
-variable named `mode` silently became an Edge property (error `-1728`), and
-`tab` silently became Edge's `tab` *class*, emitting the literal word `"tab"`
-as a column separator. Both compiled cleanly under `osacompile`.
-
-## Troubleshooting
-
-| Message | Cause |
-|---|---|
-| *Edge is refusing to run JavaScript from AppleScript* | The setup toggle above is off |
-| *This terminal is not allowed to control Microsoft Edge* | Grant it under Privacy & Security › Automation |
-| *Microsoft Edge is not running* | Open Edge and sign in to ChatGPT |
-| *The ChatGPT tab has no composer* | The tab is on a login, Cloudflare or error page |
-| *Could not press Send* | Usually a ChatGPT redesign — see below |
-| *Timed out …* | Raise `--timeout`; the message reports how much text had arrived |
-
-Error matching is by **numeric AppleScript code**, not English text, because
-macOS localises these messages.
-
-## Known fragility
-
-The CSS selectors are the brittle part: a ChatGPT redesign breaks them. They
-are all in the `SELECTORS` object at the top of `chatgpt_dom.js`, so it is a
-one-place fix. To find the new values, open the ChatGPT tab and inspect the
-composer and its send button.
-
-Two traps worth remembering when you do:
-
-- **The send button does not exist while the composer is empty.** Type
-  something first, then inspect. `data-testid="send-button"` was verified live
-  on 2026-09-16.
-- **`aria-label` is localised** — on a Vietnamese UI the send button reads
-  *"Gửi câu lệnh"*. Match `data-testid`, never visible text.
-
-### Sharing the tab
-
-Concurrent use is handled for *reading* but not for *writing*: while ChatGPT is
-generating, the send button is replaced by a stop button, so a second run
-started mid-stream fails with *Could not press Send* rather than corrupting
-anything. Run invocations one at a time.
-
-Likewise, `<code>` elements carry **no** `language-*` class. The language is a
-header label beside the Run button, which is why `chatgpt_dom.js` recovers it
-by finding the lone bare word near the code that is not a button caption.
-
----
-
-# chatgpt-agent.py — multi-turn tasks over a read-only workspace
-
-`chatgpt-cli.py` sends one prompt and prints one reply. `chatgpt-agent.py`
-turns that into a loop: ChatGPT asks for files, this side serves them, and the
-exchange repeats until ChatGPT answers.
-
-The point is where the work happens. ChatGPT does the reading and the
-reasoning, so that cost lands on web-chat quota; this process only fetches what
-was asked for. A diff never has to pass through the agent that ran the command.
-
-```bash
-./chatgpt-agent.py --preset review --workspace ~/code/app "review this branch"
-./chatgpt-agent.py --preset plan --session app --out plan.md "add retry to ingest"
-```
-
-## Layers
-
-| File | Responsibility |
-|---|---|
-| `chatgpt-agent.py` | the loop, sessions, CLI |
-| `chatgpt_protocol.py` | the `c2c` wire format — parsing requests, rendering results |
-| `chatgpt_ops.py` | what may be read, and the fence around it |
-| `presets/*.md` | what the task is; nothing else knows about "review" |
-
-A new task type is a new file in `presets/`. It never touches the other three.
-
-## The c2c format
-
-ChatGPT asks by emitting one fenced block tagged `c2c`:
-
-````
-```c2c
-{"ops":[{"op":"read","path":"src/pay.py"},{"op":"search","pattern":"calc_fee"}]}
-```
-````
-
-**A reply with no block is the final answer.** That rule was chosen so the
-likely failure is the harmless one: a model that forgets the block ends the run
-early, where a model that forgets a "done" marker would hang it forever.
-
-Read-only ops: `read`, `list`, `search`, `git_diff`, `git_log`, `git_show`.
-
-When the repository has a [GitNexus](https://github.com/looptech-ai/gitnexus)
-index, six more answer in one call what search and read approximate over
-several rounds: `graph_status`, `impact`, `context`, `trace`, `graph_query`,
-`detect_changes`. They are optional — without an index they say so and the
-model falls back to search.
+Run `python3 scripts/doctor.py` to check all of it at once.
 
 ## What it can and cannot do
 
@@ -346,8 +115,10 @@ Three things bound it, and it is worth being exact about which is which:
   drifts or blunders. It is **not** a sandbox, and anyone determined to spell a
   command differently will. The command runs as you either way.
 
-So: read-only by construction, or shell because you asked for it. There is no
-third state where shell is on and the bridge is still a fence.
+So there are three states, and which one you are in is a flag you passed:
+read-only by construction, commands because you asked for them with
+`--allow-shell`, or the workspace as the target with `--write`. None of them is
+a fence around a shell that is already running as you.
 
 ### `--write`: implementing, not reviewing
 
@@ -384,6 +155,13 @@ Two things it does not change. A green suite is evidence about the suite, not
 about the change — read the diff. And the bridge still drives one browser tab,
 so runs stay one at a time.
 
+Implement runs also get a larger data budget — 700,000 characters against a
+review's 250,000. The first real one spent a review's budget inside four rounds
+and never reached an edit: reading the files to change, the conventions around
+them and one reference implementation costs more than reading a diff. Keep an
+eye on the `[spent/total]` counter in the progress log, and prefer `sed -n`
+ranges over `cat` on large reference files.
+
 ## Flags
 
 | Flag | Default | Purpose |
@@ -394,8 +172,8 @@ so runs stay one at a time.
 | `--new` | off | start a fresh chat for that session name |
 | `--out` | none | also write the answer to a file |
 | `--max-rounds` | `8` | query budget before a conclusion is demanded |
-| `--max-chars` | `250000` | workspace data served across the whole run |
-| `--round-chars` | `80000` | workspace data served in one round |
+| `--max-chars` | `250000`, or `700000` with `--write` | workspace data served across the whole run |
+| `--round-chars` | `80000`, or `120000` with `--write` | workspace data served in one round |
 | `--allow-shell` | off | add the op that runs commands on your machine |
 | `--write` | off | implement mode: edit, test and commit the workspace (implies `--allow-shell`) |
 | `--retries` | `3` | attempts per exchange before giving up |
@@ -405,100 +183,34 @@ so runs stay one at a time.
 Sessions live in `~/.chatgpt-agent/sessions.json` as name → conversation URL.
 Without `--session`, every run starts a fresh chat and nothing is remembered.
 
-## Testing
+## One run at a time
 
-```bash
-node test_chatgpt_dom.js
-python3 -m unittest discover -p 'test_*.py' < /dev/null
-```
+The bridge steers a single browser tab: `ensure_tab` takes the first ChatGPT tab
+it finds and navigates it. A second run started while the first is generating
+steers that conversation out from under it and fails with *Could not press
+Send*. There is no parallel mode.
 
-`< /dev/null` matters: `ReadPromptTest` reads real stdin, so without a terminal
-and without a redirect the suite waits for input that never comes.
+Continuing an exhausted run under the same `--session` does not buy anything
+either: the data budget resets per run, but every result already served stays in
+the conversation, so the next run starts near the model's context limit. Start a
+fresh chat and carry the findings across in the prompt.
 
-## Why Edge, and only Edge
+## Troubleshooting
 
-The AppleScript verb this tool depends on, `execute tab N of window M
-javascript`, is Chromium vocabulary: AppleScript resolves it against the
-application's dictionary **at compile time**, not at run time. Three things
-follow, each verified on a machine with Edge and no Chrome:
-
-- A literal `tell application "Google Chrome"` block fails to compile at all
-  when Chrome is absent — error `-2741`, before a single line runs. A script
-  with a branch per browser is therefore not possible: one missing browser
-  breaks the whole file.
-- `using terms from application "Google Chrome"` does not rescue it. With
-  Chrome absent the terms silently fail to load and `execute … javascript` is
-  then a syntax error.
-- `using terms from application "Microsoft Edge"` — an installed browser —
-  followed by `tell application <variable>` *does* work, returning `42` from
-  `1+41`.
-
-So supporting the whole Chromium family is possible, but only by substituting
-an installed browser's name into the `using terms from` line before running.
-That is deliberately not done here: it reintroduces string interpolation into
-the AppleScript source, which this bridge otherwise refuses to do, in exchange
-for code paths that nobody has run.
-
-Safari is a separate implementation, not a flag: it uses `do JavaScript in
-document`, different syntax entirely. Firefox has no AppleScript scripting and
-never will.
-
-## Large payloads go as attachments
-
-Typing into the ChatGPT composer costs time **quadratic in the number of
-newlines**, not in characters. Measured on the live composer with the same
-40,000 characters throughout:
-
-| lines | insert time |
+| Message | Cause |
 |---|---|
-| 1 | 0.1s |
-| 50 | 0.5s |
-| 200 | 2.4s |
-| 700 | 16.7s |
-| 2000 | 116.3s |
+| *Edge is refusing to run JavaScript from AppleScript* | The setup toggle above is off |
+| *This terminal is not allowed to control Microsoft Edge* | Grant it under Privacy & Security › Automation |
+| *Microsoft Edge is not running* | Open Edge and sign in to ChatGPT |
+| *The ChatGPT tab has no composer* | The tab is on a login, Cloudflare or error page |
+| *Could not press Send* | Usually a ChatGPT redesign — see below |
+| *Timed out …* | Raise `--timeout`; the message reports how much text had arrived |
 
-`execCommand("insertText")` makes ProseMirror build one block node per line
-inside a single transaction. A file listing or a diff is the worst possible
-shape, and a big one freezes the tab outright. So above 120 lines the payload is
-uploaded as a `.txt` instead and the composer gets a one-line pointer. The same
-3000-line payload that would take three minutes to type attaches in 0.1s.
+Error matching is by **numeric AppleScript code**, not English text, because
+macOS localises these messages.
 
-**Nothing is written to this machine.** The file is built in the page from data
-already in memory; there is no temp file to clean up locally.
+## More
 
-**The upload does persist in your ChatGPT account.** It belongs to the
-conversation it was sent in, and stays there. A run that attaches on four rounds
-leaves four files, and repeated names get numbered — `c2c-8fd3427b(3).txt`.
-Deleting the conversation takes its attachments with it, which is the argument
-for `--session`: everything a project uploads stays in one conversation you can
-delete in one action. `--forget` only drops this tool's bookmark; it does not
-touch anything in ChatGPT.
-
-The threshold is `ATTACH_LINES` in `chatgpt-cli.py`. Raising it means fewer
-uploads and slower turns; the table above is the trade.
-
-## When a run is interrupted
-
-Everything served stays in the ChatGPT conversation forever, so the run has two
-data ceilings as well as a round count: `--round-chars` stops one greedy turn
-(six ops at the per-op ceiling would be 384 KB in a single message) and
-`--max-chars` stops the slower death across many polite rounds. Running out of
-context does not announce itself — the model starts forgetting the protocol
-instead, which looks like a parser bug. The budget is printed each round.
-
-Each exchange is retried `--retries` times. Sending and waiting are retried
-separately: once a message has been posted the retry goes back to waiting on
-its marker, never to posting it again.
-
-If a run still dies, the conversation URL and a resume command are printed, and
-a checkpoint was written before the failure:
-
-```
-conversation: https://chatgpt.com/c/...
-resume with: --resume --session app
-```
-
-`--resume` reopens that conversation and asks whether the interrupted message
-already has a reply — if it does, the run continues from there without
-re-sending it. Runs are checkpointed under their `--session` name, or under
-`_last` when none was given, in `~/.chatgpt-agent/runs/`.
+- [docs/internals.md](docs/internals.md) — how the bridge works, the `c2c`
+  protocol, testing, and the traps that cost a debugging session each
+- [CHANGELOG.md](CHANGELOG.md) — what changed and why

@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.3.1
+
+**Fixed: `search` returned "no matches" whenever the task arrived on stdin.**
+`_run` spawned ripgrep without setting `stdin`, so the child inherited the
+parent's — and ripgrep with a non-tty stdin searches *stdin* rather than the
+path it was given. Passing a long task on stdin is the documented way to do it,
+so in exactly that shape every search came back empty, with no error anywhere to
+say why. Both `_run` and the shell op now close stdin; a regression test drives
+the search op from a process whose stdin holds data, and goes red when the fix
+is removed.
+
+Found by chasing four test failures that only appeared "under load". They were
+not load: `echo x | python3 test_chatgpt_ops.py` fails, `... < /dev/null`
+passes. The earlier diagnosis was wrong because the runner kept only `tail -1`
+of the output.
+
+**Fixed: the briefing contradicted itself in write mode.** The protocol opened
+with "You are connected to a local workspace through a read-only bridge" and
+then appended a briefing asking for edits. The opening line is now chosen by
+mode, and the op list is introduced as "ops for reading the workspace" rather
+than "all read-only".
+
+**Docs: the README was 511 lines and claimed read-only in three places.**
+Restructured to 214 — what it is, the three things it does, install, setup, the
+honest capability section, flags, and the one-run-at-a-time rule. The bridge
+internals, the `c2c` protocol, the Edge traps and the testing notes moved to
+`docs/internals.md`. The plugin and marketplace descriptions, the reviewer
+agent's "nothing you forward can modify the repository", and the runtime skill's
+summary were all written before `--write` existed and said so.
+
+
+**Fixed: an implement run inherited a review's data budget and died inside four
+rounds.** Measured on the first real `--write` task: 250,000 characters gone
+before a single file was edited, spent reading the files to change, the
+conventions around them and one reference implementation. A review reads a diff
+and concludes; an implement run reads more and then still has to write, build
+and test.
+
+`--write` now defaults to 700,000 characters per run and 120,000 per round,
+and `--max-chars` / `--round-chars` still win when given. The chosen budget is
+printed at the start of the run, next to the workspace facts, so the number is
+visible before it matters rather than after.
+
+**Fixed: the exhaustion notice told an implement run to do the wrong thing.**
+"Conclude with what you have and say what you could not verify" is review
+language. An implement run that concludes without saying what it left in the
+worktree loses the work — an uncommitted edit dies with the session. Write mode
+now gets its own notice: say exactly what is in the worktree and what is
+missing, and do not claim the task is done.
+
+
 ## 0.3.0
 
 **New: `--write`, an implement mode.** The bridge could already change a tree —

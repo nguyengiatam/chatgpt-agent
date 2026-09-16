@@ -7,11 +7,13 @@ is decided by `resolve_path`, in code, where no prompt can argue with it.
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
 
 import chatgpt_ops as ops
 
@@ -212,6 +214,45 @@ class LimitTest(TempRootTest):
     def test_default_limit_still_works(self):
         result = ops.execute(self.root, {"op": "read", "path": "src/pay.py"})
         self.assertIn("def fee", result["body"])
+
+
+class StdinIsNotInheritedTest(unittest.TestCase):
+    """A child that reads stdin eats the caller's task.
+
+    ripgrep with a non-tty stdin searches stdin instead of the path, so when
+    the agent's own task arrived on stdin - the documented way to pass a long
+    one - every search came back "no matches" and nothing reported an error.
+    """
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        with open(os.path.join(self.dir, "hay.py"), "w") as handle:
+            handle.write("needle_in_here = 1\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_search_still_finds_matches_when_stdin_holds_data(self):
+        script = (
+            "import sys, os, json\n"
+            "sys.path.insert(0, %r)\n"
+            "import chatgpt_ops as ops\n"
+            "r = ops.execute(%r, {'op': 'search', 'pattern': 'needle_in_here'})\n"
+            "print(json.dumps(r.get('body') or r.get('error') or ''))\n"
+        ) % (_HERE, self.dir)
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            input="a task arriving on stdin\n" * 50,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("hay.py", proc.stdout)
+
+    def test_a_shell_command_reading_stdin_gets_nothing(self):
+        result = ops.execute(self.dir, {"op": "shell", "cmd": "cat"},
+                             allow_shell=True)
+        self.assertNotIn("error", result)
+        self.assertIn("no output", result["body"])
 
 
 class SearchLimitRegressionTest(TempRootTest):

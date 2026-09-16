@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Run a multi-turn task in ChatGPT, serving it read-only workspace data.
+"""Run a multi-turn task in ChatGPT, serving it workspace data as it asks.
+
+Read-only by default; --write lets the run edit, test and commit the workspace.
 
     chatgpt-agent.py --preset review --workspace ~/code/app "review this branch"
     chatgpt-agent.py --preset plan --session app --out plan.md "add retry to ingest"
@@ -41,11 +43,28 @@ DEFAULT_RUN = "_last"
 RUN_CHARS = 250000
 ROUND_CHARS = 80000
 
+# An implement run reads far more than a review does - the files it will edit,
+# the conventions around them, one reference implementation - and then still
+# has to write, build and test. Measured: a C4-sized task spent the review
+# budget inside four rounds and never reached an edit. So --write raises both
+# ceilings unless the caller sets them.
+WRITE_RUN_CHARS = 700000
+WRITE_ROUND_CHARS = 120000
+
 RETRY_PAUSE = 2.0
 RECOVER_TIMEOUT = 25.0
 
+# The opening line has to match the mode. Saying "read-only bridge" and then
+# appending a briefing that asks for edits is the contradiction that made an
+# implement run spend its first rounds arguing with itself.
+PROTOCOL_OPENING = {
+    "review": "You are connected to a local workspace through a read-only bridge.",
+    "implement": "You are connected to a local workspace through a bridge. Reading goes "
+                 "through the ops below; changing the workspace goes through the command op.",
+}
+
 PROTOCOL = """\
-You are connected to a local workspace through a read-only bridge. You cannot
+{opening} You cannot
 see any file until you ask for it.
 
 To ask, reply with a fenced block tagged `c2c` holding JSON:
@@ -54,7 +73,7 @@ To ask, reply with a fenced block tagged `c2c` holding JSON:
 {"ops":[{"op":"read","path":"src/pay.py"},{"op":"search","pattern":"calc_fee"}]}
 ```
 
-Available ops, all read-only:
+Ops for reading the workspace:
 
     {"op":"read","path":"<rel>","start":<line>,"end":<line>}   start/end optional
     {"op":"list","path":"<rel>"}
@@ -141,6 +160,16 @@ operator's terminal before it runs.
 DATA_SPENT = (
     "The data budget for this run is spent; no further file contents can be "
     "served. Conclude with what you have and say what you could not verify."
+)
+
+# In an implement run the same moment is not "conclude" but "land what you
+# have": an uncommitted edit dies with the session, a described partial commit
+# does not.
+DATA_SPENT_WRITE = (
+    "The data budget for this run is spent; no further file contents or "
+    "commands can be served. If you have already made changes, they are still "
+    "in the worktree - say exactly what is there and what is missing, so the "
+    "next run can pick it up. Do not claim the task is done."
 )
 
 
@@ -345,6 +374,8 @@ def load_preset(name):
 
 
 def opening_message(preset, root, task, shell=False, write=False, facts=None):
+    protocol = PROTOCOL.replace(
+        "{opening}", PROTOCOL_OPENING["implement" if write else "review"])
     extra = ""
     if write:
         extra = "\n" + WRITE_PROTOCOL
@@ -354,7 +385,7 @@ def opening_message(preset, root, task, shell=False, write=False, facts=None):
     if facts:
         where += "\n" + "\n".join("- " + fact for fact in facts)
     return "\n\n".join([
-        PROTOCOL + extra,
+        protocol + extra,
         "---",
         preset,
         "---",
@@ -393,6 +424,8 @@ def run(args, log, progress):
         saved = load_sessions().get(args.session) if (args.session and not args.new) else None
         facts = workspace_facts(root)
         log("workspace: " + root + (" (write)" if args.write else ""))
+        log("  data budget: " + str(args.max_chars) + " chars, "
+            + str(args.round_chars) + " per round")
         for fact in facts:
             log("  " + fact)
         log("conversation: " + (saved or "new chat"))
@@ -474,7 +507,7 @@ def run(args, log, progress):
         if notice:
             message += "\n\n" + notice
         if budget.exhausted():
-            message += "\n\n" + DATA_SPENT
+            message += "\n\n" + (DATA_SPENT_WRITE if args.write else DATA_SPENT)
         reply = None
         save_run(name, {
             "url": progress.get("url"), "root": root, "round": round_number + 1,
@@ -505,10 +538,12 @@ def build_parser():
     parser.add_argument("--new", action="store_true", help="start a fresh chat for --session")
     parser.add_argument("--out", default=None, help="also write the answer to this file")
     parser.add_argument("--max-rounds", type=int, default=8, help="query budget (default: 8)")
-    parser.add_argument("--max-chars", type=int, default=RUN_CHARS,
-                        help="workspace data served per run (default: %d)" % RUN_CHARS)
-    parser.add_argument("--round-chars", type=int, default=ROUND_CHARS,
-                        help="workspace data served per round (default: %d)" % ROUND_CHARS)
+    parser.add_argument("--max-chars", type=int, default=None,
+                        help="workspace data served per run (default: %d, or %d with --write)"
+                             % (RUN_CHARS, WRITE_RUN_CHARS))
+    parser.add_argument("--round-chars", type=int, default=None,
+                        help="workspace data served per round (default: %d, or %d with --write)"
+                             % (ROUND_CHARS, WRITE_ROUND_CHARS))
     parser.add_argument("--allow-shell", action="store_true",
                         help="let ChatGPT run commands on this machine (off by default)")
     parser.add_argument("--write", action="store_true",
@@ -556,6 +591,10 @@ def main(argv=None):
         args.allow_shell = True
     if args.preset is None:
         args.preset = "implement" if args.write else "review"
+    if args.max_chars is None:
+        args.max_chars = WRITE_RUN_CHARS if args.write else RUN_CHARS
+    if args.round_chars is None:
+        args.round_chars = WRITE_ROUND_CHARS if args.write else ROUND_CHARS
 
     args.task = cgpt.read_prompt(args.words)
     if not args.task and not args.resume:

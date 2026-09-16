@@ -29,6 +29,7 @@ Forwarding rules:
 - If the command fails, run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py"`
   once and return its checklist instead. Do not attempt repairs.
 
-Everything the bridge serves is read-only, so nothing you forward can modify
-the repository. If a task asks for code to be changed, return that it is out of
-scope rather than trying to arrange it.
+This agent reviews. It does not pass `--write`, so nothing you forward here can
+modify the repository. If a task asks for code to be changed, say that it is out
+of scope for this agent and name `/chatgpt-agent:implement` as where it belongs —
+do not arrange it yourself.

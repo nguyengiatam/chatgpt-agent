@@ -7,7 +7,8 @@ description: Use when invoking or debugging the ChatGPT bridge from Claude Code 
 
 `chatgpt-agent.py` runs a task inside the ChatGPT web UI and serves it
 workspace data until it answers — read-only by default, plus one command-running
-op when the caller passes `--allow-shell`. ChatGPT does the reading and the
+op when the caller passes `--allow-shell`, and the workspace itself as the target
+when the caller passes `--write`. ChatGPT does the reading and the
 reasoning; this side only serves what was asked for.
 
 The point is where the cost lands. The diff is never pasted into a prompt by
@@ -28,8 +29,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/chatgpt-agent.py" --preset review [flags] "<task>
 | `--new` | off | start that session over |
 | `--out` | none | also write the answer to a file |
 | `--max-rounds` | `8` | query budget before a conclusion is demanded |
-| `--max-chars` | `250000` | workspace data served across the run |
-| `--round-chars` | `80000` | workspace data served in one round |
+| `--max-chars` | `250000`, `700000` with `--write` | workspace data served across the run |
+| `--round-chars` | `80000`, `120000` with `--write` | workspace data served in one round |
 | `--allow-shell` | off | add the op that runs commands on this machine |
 | `--write` | off | implement mode: edit, test and commit the workspace (implies `--allow-shell`, preset `implement`) |
 | `--retries` | `3` | attempts per exchange before giving up |
@@ -110,6 +111,19 @@ when shell is available: have ChatGPT *design* the mutations, let Claude Code
 run them, then feed the results back with `--session` for the verdict. Not for
 safety, but because the party being gated should not also be the party holding
 the evidence. The `go test` output is then a record anyone can re-check.
+
+⚠ **An implement run's real ceiling is the data budget, not `--max-rounds`.**
+The first one measured spent a review's 250,000 characters inside four rounds —
+reading the files to change, the conventions, and one reference implementation —
+and never reached an edit. `--write` raises the default to 700,000, but the
+prompt still decides: name **one** reference implementation, not three, and say
+to read it with `sed -n` ranges rather than `cat`. Watch the `[spent/total]`
+counter in the log.
+
+Continuing that run in the same `--session` does not help: the budget resets per
+run, but every result already served stays in the ChatGPT conversation, so the
+next run starts near the model's context limit. Start a fresh chat and carry the
+previous run's findings across in the prompt.
 
 The same split applies to `--write`: the run that writes the code is not the
 run that certifies it. Take the commit it produces and gate it separately —

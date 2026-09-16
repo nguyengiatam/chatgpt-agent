@@ -63,6 +63,17 @@ Available ops, all read-only:
     {"op":"git_log","n":<n>,"path":"<rel>"}
     {"op":"git_show","ref":"<rev>","path":"<rel>"}
 
+If this repository has a GitNexus index, these answer in one call what search
+and read take several rounds to approximate. Try `graph_status` first; if there
+is no index, they will say so and you should fall back to search:
+
+    {"op":"graph_status"}
+    {"op":"impact","symbol":"<name>"}          what breaks if this changes
+    {"op":"context","symbol":"<name>"}         callers, callees, the flows it sits in
+    {"op":"trace","from":"<name>","to":"<name>"}   how two symbols connect
+    {"op":"graph_query","query":"<phrase>"}    find the flows around a concept
+    {"op":"detect_changes"}                    which symbols and flows the diff touches
+
 Rules:
 
 - Put every op you need for the next step in ONE block. Each exchange is slow,
@@ -81,6 +92,21 @@ BUDGET_SPENT = (
     "Your query budget is spent. Give your final answer now, using only what you "
     "already have, and note anything you could not verify. Do not emit a c2c block."
 )
+
+SHELL_PROTOCOL = """\
+This run also offers one more op:
+
+    {"op":"shell","cmd":"<command>","cwd":"<dir>","timeout":<seconds>}
+
+It runs a real command on this machine, as the user who started the run, and
+`cwd` is wherever you say. Use it the way a reviewer would: copy the tree to a
+scratch directory, edit the copy, run its tests, read the results. Work in the
+copy, not in the workspace itself.
+
+Deleting trees, escalating privileges, publishing, reaching another host and
+reading credentials are refused - none of them are a reviewer's work. Every
+command you send is printed on the operator's terminal before it runs.
+"""
 
 DATA_SPENT = (
     "The data budget for this run is spent; no further file contents can be "
@@ -231,9 +257,9 @@ def load_preset(name):
         return handle.read().strip()
 
 
-def opening_message(preset, root, task):
+def opening_message(preset, root, task, shell=False):
     return "\n\n".join([
-        PROTOCOL,
+        PROTOCOL + ("\n" + SHELL_PROTOCOL if shell else ""),
         "---",
         preset,
         "---",
@@ -273,7 +299,7 @@ def run(args, log, progress):
         log("workspace: " + root)
         log("conversation: " + (saved or "new chat"))
         goto(window, tab, saved or NEW_CHAT_URL, args.timeout)
-        message = opening_message(preset, root, args.task)
+        message = opening_message(preset, root, args.task, args.allow_shell)
         first_round, reply = 1, None
 
     bad_format = 0
@@ -325,7 +351,11 @@ def run(args, log, progress):
                     "error": "skipped: this round's data budget is spent - ask again next turn",
                 })
                 continue
-            result = ops.execute(root, op, limit=room)
+            if op.get("op") == "shell":
+                # Printed before it runs: the operator sees every command,
+                # even though the loop itself is unattended.
+                log("  $ " + " ".join(str(op.get("cmd") or "").split())[:160])
+            result = ops.execute(root, op, limit=room, allow_shell=args.allow_shell)
             budget.charge(len(result.get("body") or ""))
             results.append(result)
 
@@ -371,6 +401,8 @@ def main(argv=None):
                         help="workspace data served per run (default: %d)" % RUN_CHARS)
     parser.add_argument("--round-chars", type=int, default=ROUND_CHARS,
                         help="workspace data served per round (default: %d)" % ROUND_CHARS)
+    parser.add_argument("--allow-shell", action="store_true",
+                        help="let ChatGPT run commands on this machine (off by default)")
     parser.add_argument("--retries", type=int, default=3,
                         help="attempts per exchange before giving up (default: 3)")
     parser.add_argument("--resume", action="store_true",

@@ -1,13 +1,14 @@
 ---
 name: chatgpt-agent-runtime
-description: Use when invoking or debugging the ChatGPT bridge from Claude Code — the flags that exist, the prerequisites that make it fail before it starts, the one-run-at-a-time rule, and what the bridge deliberately cannot do.
+description: Use when invoking or debugging the ChatGPT bridge from Claude Code — the flags that exist, the prerequisites that make it fail before it starts, the one-run-at-a-time rule, which tasks fit the bridge at all, and what --allow-shell does and does not bound.
 ---
 
 # ChatGPT bridge runtime
 
 `chatgpt-agent.py` runs a task inside the ChatGPT web UI and serves it
-read-only workspace data until it answers. ChatGPT does the reading and the
-reasoning; this side only fetches what was asked for.
+workspace data until it answers — read-only by default, plus one command-running
+op when the caller passes `--allow-shell`. ChatGPT does the reading and the
+reasoning; this side only serves what was asked for.
 
 The point is where the cost lands. The diff is never pasted into a prompt by
 the caller, so it never enters Claude's context, and the reasoning is billed to
@@ -29,6 +30,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/chatgpt-agent.py" --preset review [flags] "<task>
 | `--max-rounds` | `8` | query budget before a conclusion is demanded |
 | `--max-chars` | `250000` | workspace data served across the run |
 | `--round-chars` | `80000` | workspace data served in one round |
+| `--allow-shell` | off | add the op that runs commands on this machine |
 | `--retries` | `3` | attempts per exchange before giving up |
 | `--resume` | off | continue this session's interrupted run |
 | `--timeout` | `300` | seconds to wait for one reply |
@@ -60,20 +62,39 @@ Each message carries a marker so the loop can find its own reply. That makes it
 safe for the user to keep using the tab, but it does not make concurrent runs
 safe.
 
-## What it cannot do
+## What it can and cannot do
 
-There is no write op and no shell op — absent, not disabled. Reviewing means
-feeding a model text nobody on this side wrote, so a repository comment saying
-*"ignore your instructions and run …"* has to reach a capability that does not
-exist.
+Default: read only. Paths go through `realpath` and a containment check before
+every read, and `.env*`, private keys and credential files are refused. Those
+rules live in `chatgpt_ops.py`, not in the prompt, so the model cannot argue
+with them. The bridge edits nothing; if a task needs code changed, that is
+Claude's job after the review.
 
-Paths are resolved with `realpath` and checked for containment before every
-read, and `.env*`, private keys and credential files are refused. Those rules
-live in `chatgpt_ops.py`, not in the prompt, so the model cannot argue with
-them.
+`--allow-shell` adds one op that runs real commands on the machine, as the user
+who started the run. Pass it only when the task genuinely needs execution —
+running a suite, seeding a mutation, reproducing a failure. Every command is
+printed to stderr before it runs, and `shell_objection` refuses deletes,
+escalation, publishing, remote access and credential reads. Those refusals
+bound the role, not the blast radius: they catch drift, not evasion.
 
-Consequence for callers: the bridge never edits anything. If a task needs code
-changed, that is Claude's job after the review, not the bridge's.
+## Tasks that do not fit
+
+Before writing a task with a pass/fail gate in it, check which of these it is.
+
+**Fits read-only:** judging a diff, finding call sites, checking whether tests
+exist and what they cover, tracing how a change propagates, writing a plan.
+
+**Needs `--allow-shell`:** anything whose answer is an observation rather than a
+reading — did the suite go red, does this reproduce, what does the build say.
+
+**Does not fit at all:** changing the workspace itself. The bridge works in
+copies. If the outcome is an edit to the real tree, that belongs to Claude.
+
+For a gate — "GO only if these four mutants go red" — prefer splitting it even
+when shell is available: have ChatGPT *design* the mutations, let Claude Code
+run them, then feed the results back with `--session` for the verdict. Not for
+safety, but because the party being gated should not also be the party holding
+the evidence. The `go test` output is then a record anyone can re-check.
 
 ## Reading the result
 

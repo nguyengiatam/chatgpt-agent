@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
-"""The read-only operations the model is allowed to request.
+"""The operations the model is allowed to request.
 
-There is no write and no shell here, by construction rather than by policy: a
-prompt-injected instruction cannot reach a capability that does not exist. What
-remains - reading and searching - is fenced by `resolve_path`, which every op
-goes through and no prompt can talk its way past.
+By default every op here only reads: files, directories, search, git history,
+and the GitNexus graph when one exists. File paths go through `resolve_path`,
+which every read is routed through and no prompt can talk its way past.
+
+A caller that passes `--allow-shell` adds one more op that runs real commands
+on the machine, as the user who started the run. That exists because some
+questions - does this test suite actually catch this bug? - cannot be answered
+by reading. It is off unless asked for, every command is printed before it
+runs, and `shell_objection` refuses work that is not a reviewer's. Those
+refusals bound the role, not the blast radius; see the note above them.
+
+So the honest summary is conditional: with shell off, an instruction hidden in
+a repository cannot reach a capability that does not exist. With shell on, it
+can, and the operator chose that trade.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -16,7 +27,10 @@ from chatgpt_protocol import truncate
 MAX_CHARS = 64000
 SEARCH_LIMIT = 50
 
-ALLOWED_OPS = ("read", "list", "search", "git_diff", "git_log", "git_show")
+ALLOWED_OPS = (
+    "read", "list", "search", "git_diff", "git_log", "git_show",
+    "graph_status", "impact", "context", "trace", "graph_query", "detect_changes",
+)
 
 # Directories that are never worth a model's context budget.
 SKIP_DIRS = frozenset([
@@ -141,6 +155,91 @@ def _ok(label, body, lang="", note=None):
     if note:
         result["note"] = note
     return result
+
+
+# --- shell, when the caller opts in ----------------------------------------
+#
+# These patterns bound the ROLE, not the blast radius. A reviewer copies a
+# tree, seeds a mutation and runs a test suite; it has no business deleting
+# trees, escalating, publishing, reaching another host or reading keys. Saying
+# no to those catches a model that drifts or blunders.
+#
+# They are not a security boundary and must never be described as one. Anything
+# expressible in a shell can be spelled another way, and the command already
+# runs as the user who started the tool. The real control is that the whole op
+# is absent unless --allow-shell was passed, and that every command is printed
+# before it runs.
+
+SHELL_TIMEOUT = 120
+SHELL_TIMEOUT_MAX = 900
+
+_OUT_OF_ROLE = [
+    (r"\brm\s+-[a-zA-Z]*[rR]", "recursive delete"),
+    (r"\bmkfs|\bdd\s+[^;&|]*\bof=|>\s*/dev/", "writing to a device"),
+    (r"\bsudo\b|\bdoas\b|\bsu\s+-", "privilege escalation"),
+    (r"\bshutdown\b|\breboot\b|\bhalt\b|\bkillall\b|\bcrontab\b|\blaunchctl\b",
+     "controlling the machine"),
+    (r"\.ssh/id_|\.aws/credentials|\.netrc\b|security\s+find-\w+-password",
+     "reading credentials"),
+    (r"\b(curl|wget)\b[^|]*\|\s*(ba|z|k)?sh\b", "piping the network into a shell"),
+    # ssh must sit in command position, so that a path like ~/.ssh/config
+    # is left to the credentials rule above rather than mislabelled here.
+    (r"(?:^|[\s;&|(])ssh\s|\bscp\s|\bsftp\s", "reaching another host"),
+    (r"\bgit\s+push\b|\bnpm\s+publish\b|\byarn\s+publish\b|\bgh\s+(release|pr)\s",
+     "publishing"),
+    (r"\bgit\s+reset\s+--hard\b|\bgit\s+clean\b|\bgit\s+checkout\s+--force\b",
+     "destroying local work"),
+]
+
+_OUT_OF_ROLE = [(re.compile(pattern, re.IGNORECASE), why) for pattern, why in _OUT_OF_ROLE]
+
+
+def shell_objection(cmd):
+    """Why this command is not a reviewer's to run, or None.
+
+    Matched against the whole string, so a refusal hidden behind `&&` is still
+    caught. Not a sandbox - see the note above.
+    """
+    text = " " + " ".join((cmd or "").split())
+    for pattern, why in _OUT_OF_ROLE:
+        if pattern.search(text):
+            return (
+                "refused: " + why + " is out of scope for a review. Work in a copy "
+                "and keep to reading, editing that copy, and running its tests."
+            )
+    return None
+
+
+def _op_shell(root, op, limit):
+    cmd = op.get("cmd")
+    if not cmd:
+        raise OpError('missing "cmd"')
+    objection = shell_objection(str(cmd))
+    if objection:
+        raise OpError(objection)
+
+    # cwd is not fenced, and pretending otherwise would be theatre: the command
+    # string can `cd`. A copy of the tree elsewhere is the point of the op.
+    where = op.get("cwd")
+    cwd = os.path.realpath(os.path.expanduser(str(where))) if where else os.path.realpath(root)
+    if not os.path.isdir(cwd):
+        raise OpError("no such directory: " + str(where))
+
+    seconds = min(int(op.get("timeout") or SHELL_TIMEOUT), SHELL_TIMEOUT_MAX)
+    try:
+        proc = subprocess.run(
+            str(cmd), shell=True, cwd=cwd, capture_output=True,
+            text=True, errors="replace", timeout=seconds,
+        )
+    except subprocess.TimeoutExpired:
+        raise OpError("timed out after " + str(seconds) + "s: " + str(cmd))
+    except OSError as exc:
+        raise OpError("could not run: " + str(exc))
+
+    output = (proc.stdout or "") + (proc.stderr or "")
+    body, note = truncate(output.strip() or "(no output)", limit)
+    label = "shell (exit " + str(proc.returncode) + "): " + " ".join(str(cmd).split())[:120]
+    return _ok(label, body, "", note)
 
 
 # --- operations ------------------------------------------------------------
@@ -273,7 +372,114 @@ def _op_git_show(root, op, limit):
     return _git(root, op, argv, "git show " + ref, limit)
 
 
+# --- knowledge graph, when one has been built ------------------------------
+#
+# GitNexus answers in one call what search-and-read takes several rounds to
+# approximate: who calls this, what breaks if it changes, how these two symbols
+# connect. On a repository of any size that is the difference between a review
+# that found the call sites and one that hoped it had.
+#
+# Optional by design. The index is per-repository and often absent, so every op
+# here degrades to a plain explanation rather than an error the model cannot
+# act on - `graph_status` exists so it can check before it commits to a plan.
+
+GITNEXUS_BIN = os.environ.get("GITNEXUS_BIN", "gitnexus")
+
+# Symbol names and search phrases, not options: a leading dash would be read by
+# the CLI as a flag.
+_SAFE_ARG = re.compile(r"^[A-Za-z0-9_.:/\\ ()\[\]@#-]{1,200}$")
+
+
+def _safe_arg(value, label):
+    text = str(value or "").strip()
+    if not text:
+        raise OpError('missing "' + label + '"')
+    if text.startswith("-") or not _SAFE_ARG.match(text):
+        raise OpError("blocked: unusable " + label + " " + repr(value))
+    return text
+
+
+_NO_GRAPH = (
+    "no GitNexus index answers for this repository, so graph ops cannot help "
+    "here. Use search, read and the git ops instead."
+)
+
+# gitnexus exits 0 whatever happens, prints a pino log line about the FTS
+# extension on every call, and reports real failures as a JSON object in
+# stdout. So the exit code says nothing and the output has to be read.
+_GITNEXUS_NOISE = re.compile(r'^\s*(\{"level":\d+|GitNexus \w+ \(\d)')
+
+
+def _gitnexus_clean(output):
+    kept = [
+        line for line in (output or "").splitlines()
+        if line.strip() and not _GITNEXUS_NOISE.match(line)
+    ]
+    return "\n".join(kept).strip()
+
+
+def _gitnexus(root, argv, label, limit):
+    ok, output = _run(root, [GITNEXUS_BIN] + argv)
+    if not ok:
+        lowered = output.lower()
+        if "no such file" in lowered or "not found" in lowered or "enoent" in lowered:
+            raise OpError(
+                "gitnexus is not installed, so graph ops are unavailable for this "
+                "run. Use search and read instead."
+            )
+        raise OpError(label + " failed: " + output)
+
+    cleaned = _gitnexus_clean(output)
+    lowered = cleaned.lower()
+    if "not indexed" in lowered or "not a git repository" in lowered:
+        raise OpError(_NO_GRAPH)
+    if cleaned.startswith("{") and '"error"' in cleaned:
+        try:
+            detail = json.loads(cleaned).get("error") or cleaned
+        except ValueError:
+            detail = cleaned
+        raise OpError(label + ": " + str(detail))
+
+    body, note = truncate(cleaned or "(no output)", limit)
+    return _ok(label, body, "", note)
+
+
+def _op_graph_status(root, op, limit):
+    return _gitnexus(root, ["status"], "graph status", limit)
+
+
+def _op_impact(root, op, limit):
+    target = _safe_arg(op.get("symbol") or op.get("target"), "symbol")
+    return _gitnexus(root, ["impact", target], "impact " + target, limit)
+
+
+def _op_context(root, op, limit):
+    name = _safe_arg(op.get("symbol") or op.get("name"), "symbol")
+    return _gitnexus(root, ["context", name], "context " + name, limit)
+
+
+def _op_trace(root, op, limit):
+    source = _safe_arg(op.get("from"), "from")
+    target = _safe_arg(op.get("to"), "to")
+    return _gitnexus(root, ["trace", source, target], "trace " + source + " -> " + target, limit)
+
+
+def _op_graph_query(root, op, limit):
+    phrase = _safe_arg(op.get("query"), "query")
+    return _gitnexus(root, ["query", phrase], 'graph query "' + phrase + '"', limit)
+
+
+def _op_detect_changes(root, op, limit):
+    return _gitnexus(root, ["detect-changes"], "detect changes", limit)
+
+
 _HANDLERS = {
+    "graph_status": _op_graph_status,
+    "impact": _op_impact,
+    "context": _op_context,
+    "trace": _op_trace,
+    "graph_query": _op_graph_query,
+    "detect_changes": _op_detect_changes,
     "read": _op_read,
     "list": _op_list,
     "search": _op_search,
@@ -283,19 +489,28 @@ _HANDLERS = {
 }
 
 
-def execute(root, op, limit=None):
+def available_ops(allow_shell=False):
+    """The op names a run offers, which is what the model is told about."""
+    return ALLOWED_OPS + (("shell",) if allow_shell else ())
+
+
+def execute(root, op, limit=None, allow_shell=False):
     """Run one op, always returning a result dict - never raising at the caller.
 
     `limit` is the caller's remaining data budget for this round; it only ever
     shrinks the per-op ceiling, never raises it.
+
+    `allow_shell` decides whether the shell op exists at all. Left off, it is
+    not a refused op but an unknown one, and the model is never told about it.
     """
     limit = MAX_CHARS if limit is None else min(int(limit), MAX_CHARS)
     name = str(op.get("op") or "")
-    handler = _HANDLERS.get(name)
+    handler = _op_shell if (name == "shell" and allow_shell) else _HANDLERS.get(name)
     if handler is None:
         return {
             "label": name or "(no op)",
-            "error": "unknown op " + repr(name) + "; allowed: " + ", ".join(ALLOWED_OPS),
+            "error": "unknown op " + repr(name) + "; allowed: "
+                     + ", ".join(available_ops(allow_shell)),
         }
     try:
         return handler(root, op, limit)

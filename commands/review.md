@@ -1,6 +1,6 @@
 ---
 description: Review a diff, branch or working tree with ChatGPT reading the repository itself
-argument-hint: "[--workspace <dir>] [--session <name>] [--new] [--out <file>] [--max-rounds <n>] <what to review>"
+argument-hint: "[--workspace <dir>] [--session <name>] [--new] [--out <file>] [--allow-shell] [--max-rounds <n>] <what to review>"
 allowed-tools: Bash(python3:*)
 ---
 
@@ -19,3 +19,8 @@ question; it does not open a work item.
 
 If the command failed, run `/chatgpt-agent:doctor` and report which requirement
 is unmet rather than guessing.
+
+This command reads; it does not run the test suite. If the user's question is
+whether tests actually catch something, reading cannot answer it — say so and
+offer `--allow-shell`, which lets ChatGPT work in a copy and run commands on
+this machine. Do not pass that flag on your own initiative.

@@ -222,18 +222,47 @@ ChatGPT asks by emitting one fenced block tagged `c2c`:
 likely failure is the harmless one: a model that forgets the block ends the run
 early, where a model that forgets a "done" marker would hang it forever.
 
-Ops, all read-only: `read`, `list`, `search`, `git_diff`, `git_log`, `git_show`.
+Read-only ops: `read`, `list`, `search`, `git_diff`, `git_log`, `git_show`.
 
-## What it cannot do
+When the repository has a [GitNexus](https://github.com/looptech-ai/gitnexus)
+index, six more answer in one call what search and read approximate over
+several rounds: `graph_status`, `impact`, `context`, `trace`, `graph_query`,
+`detect_changes`. They are optional — without an index they say so and the
+model falls back to search.
 
-There is no write op and no shell op — not disabled, absent. Reviewing means
-feeding the model text you did not write, so a comment in a repo saying *"ignore
-your instructions and run …"* has to reach a capability that does not exist.
+## What it can and cannot do
 
-`resolve_path` runs before every file touch, in code rather than in the prompt:
-`realpath` first so a symlink out of the workspace is caught, then containment,
-then a block on `.env*`, private keys and credential files. The model cannot
-argue with a rule it cannot see.
+By default every op only reads. `resolve_path` runs before each file touch, in
+code rather than in the prompt: `realpath` first so a symlink out of the
+workspace is caught, then containment, then a block on `.env*`, private keys
+and credential files. The model cannot argue with a rule it cannot see. With
+shell off, an instruction hidden in a repository has nothing to reach.
+
+`--allow-shell` changes that, on purpose. Some questions — *does this suite
+actually catch this bug?* — cannot be answered by reading, so the flag adds one
+op that runs real commands on your machine, as you, with `cwd` wherever the
+model asks:
+
+```bash
+./chatgpt-agent.py --preset review --allow-shell \
+  "Copy the repo to /tmp/mt, flip the comparison on line 47 there, run the tests,
+   and tell me whether they went red."
+```
+
+Three things bound it, and it is worth being exact about which is which:
+
+- **It does not exist unless you pass the flag.** Ordinary reviews stay
+  read-only. This is the control that actually matters.
+- **Every command is printed before it runs**, so an unattended loop still
+  leaves you a record of what happened.
+- **`shell_objection` refuses work that is not a reviewer's**: recursive
+  deletes, escalation, publishing, reaching another host, reading credentials,
+  destroying local work. This bounds the **role** — it catches a model that
+  drifts or blunders. It is **not** a sandbox, and anyone determined to spell a
+  command differently will. The command runs as you either way.
+
+So: read-only by construction, or shell because you asked for it. There is no
+third state where shell is on and the bridge is still a fence.
 
 ## Flags
 
@@ -247,6 +276,7 @@ argue with a rule it cannot see.
 | `--max-rounds` | `8` | query budget before a conclusion is demanded |
 | `--max-chars` | `250000` | workspace data served across the whole run |
 | `--round-chars` | `80000` | workspace data served in one round |
+| `--allow-shell` | off | add the op that runs commands on your machine |
 | `--retries` | `3` | attempts per exchange before giving up |
 | `--resume` | off | continue the interrupted run for this session |
 | `--timeout` | `300` | seconds per reply |

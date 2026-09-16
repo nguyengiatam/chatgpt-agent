@@ -77,6 +77,23 @@ class OpeningMessageTest(unittest.TestCase):
         for forbidden in ("{\"op\":\"write\"", "{\"op\":\"shell\""):
             self.assertNotIn(forbidden, message)
 
+    def test_shell_is_not_mentioned_unless_it_was_enabled(self):
+        self.assertNotIn("shell", agent.opening_message("x", "/tmp", "y"))
+
+    def test_enabling_shell_documents_it(self):
+        message = agent.opening_message("x", "/tmp", "y", shell=True)
+        self.assertIn('{"op":"shell"', message)
+        self.assertIn("cwd", message)
+
+    def test_the_shell_briefing_states_what_is_refused(self):
+        message = agent.opening_message("x", "/tmp", "y", shell=True)
+        for refused in ("Deleting trees", "escalating", "publishing", "credentials"):
+            self.assertIn(refused, message)
+
+    def test_the_shell_briefing_warns_that_commands_are_shown(self):
+        message = agent.opening_message("x", "/tmp", "y", shell=True)
+        self.assertIn("printed on the operator's terminal", message)
+
 
 class SessionStoreTest(unittest.TestCase):
     def setUp(self):

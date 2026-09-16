@@ -49,6 +49,73 @@ To update later: `/plugin marketplace update chatgpt-agent-marketplace`.
 The `chatgpt-reviewer` agent forwards the same thing from a subagent when the
 main thread should not spend context on it.
 
+### Examples
+
+Review what is uncommitted, in the repository you are in:
+
+```
+/chatgpt-agent:review Review the uncommitted change.
+```
+
+ChatGPT asks for what it needs and this side serves it. A typical run:
+
+```
+round 1/8 - asking ChatGPT
+  served 1 op(s): git_diff                          [239/250000 chars]
+round 2/8 - asking ChatGPT
+  served 5 op(s): read, search, search, search, list  [36749/250000 chars]
+round 3/8 - asking ChatGPT
+  served 4 op(s): read, read, list, search           [42104/250000 chars]
+round 4/8 - asking ChatGPT
+### Findings
+
+**Blocking — `src/pay.py:3-4` / `src/checkout.py:5`**
+`fee()` now returns `None` for `amount <= 0`, while `total()` always computes
+`base + fee(base)`. So `total(0)` raises `TypeError` instead of returning a
+number. **Fix:** keep `fee()` numeric, or make `total()` handle the no-fee case.
+...
+**Verdict: NEEDS WORK — 1 blocking finding.**
+```
+
+Rounds 2 and 3 are the point: it searched for the callers of the changed
+function and read them. A review of the diff alone would not have found that.
+
+Review a branch, in another repository, and keep the answer:
+
+```
+/chatgpt-agent:review --workspace ~/code/app --out review.md Review main..HEAD.
+```
+
+Plan a change, reusing one conversation so ChatGPT keeps what it already learned
+about the project:
+
+```
+/chatgpt-agent:plan --session app Add retry with backoff to the ingest worker.
+```
+
+Ask something that needs no repository access at all:
+
+```
+/chatgpt-agent:ask Explain the difference between a rebase and a merge commit.
+```
+
+Answer a question reading cannot answer — does the suite actually catch this? —
+by letting ChatGPT work in a copy and run the tests there:
+
+```
+/chatgpt-agent:review --allow-shell Copy the repo to /tmp/mt, flip the
+comparison on line 47 there, run the tests, and tell me whether they went red.
+```
+
+Every command it runs is printed before it runs. The flag is off unless you
+pass it, and no command in this plugin passes it for you.
+
+Same thing from the shell, without Claude Code:
+
+```bash
+python3 chatgpt-agent.py --preset review --workspace ~/code/app "Review main..HEAD."
+```
+
 ## Requirements
 
 - macOS, Microsoft Edge, signed in to ChatGPT

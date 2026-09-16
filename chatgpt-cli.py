@@ -208,10 +208,14 @@ ATTACH_LINES = 120
 ATTACH_CHARS = 80000
 ATTACH_WAIT = 90.0
 
+# Deliberately nameless. Naming the file here put the filename into the turn we
+# typed, and both guards below search the turn for that filename - so our own
+# sentence satisfied them and neither could ever fail. The model does not need
+# the name: it has to open the attachment, not look it up.
 ATTACHED_NOTE = (
-    "Everything for this turn is in the attached file {name}. It went as a file "
-    "because pasting it would stall the page. Open it and continue exactly as if "
-    "its contents had been typed here."
+    "Everything for this turn is in the file attached to this message. It went "
+    "as a file because pasting it would stall the page. Open it and continue "
+    "exactly as if its contents had been typed here."
 )
 
 
@@ -256,7 +260,7 @@ def send(window_index, tab_index, prompt):
             raise CliError(
                 "Could not attach this turn's data (" + str(result.get("error")) + ")."
             )
-        typed = marker + "\n\n" + ATTACHED_NOTE.format(name=name)
+        typed = marker + "\n\n" + ATTACHED_NOTE
     else:
         typed = marker + "\n\n" + prompt
 

@@ -305,12 +305,63 @@ test("not ready once the chip has gone, even with the button free", () => {
   assert.strictEqual(state.reason, "chip-gone");
 });
 
-test("a chip found only in the form text also counts", () => {
+test("a name appearing only in the form's text is not a chip", () => {
+  // This asserted the opposite in 0.2.2, which is how the hole got in: the
+  // innerText fallback it protected was what let our own note pass for an
+  // attachment. A chip is a labelled control or it is nothing.
   withForm([], "Cao | c2c-abc.txt | Tai lieu", "false");
+  assert.strictEqual(CGPT.attachmentReady("c2c-abc.txt").ready, false);
+});
+
+test("a chip carrying the name in title instead of aria-label counts", () => {
+  global.document = {
+    querySelector: (sel) => (sel === "form"
+      ? { querySelectorAll: () => [{ getAttribute: (a) => (a === "title" ? "c2c-abc.txt" : null) }] }
+      : { disabled: false, getAttribute: () => "false" }),
+    querySelectorAll: () => [],
+    body: {},
+  };
   assert.strictEqual(CGPT.attachmentReady("c2c-abc.txt").ready, true);
 });
 
 test("with no filename the button alone decides", () => {
   withForm([], "", "false");
   assert.strictEqual(CGPT.attachmentReady("").ready, true);
+});
+
+// --- the checks must be able to FAIL ---------------------------------------
+// Three fixes in a row were satisfied by evidence the tool wrote itself. These
+// are the tests that would have caught the second and third: they assert the
+// negative case, which is the only case a guard exists for.
+
+test("the plugin's own note does not satisfy the chip check", () => {
+  // Regression: the typed note used to carry the filename, so form.innerText
+  // always contained it and the fail-closed gate could never close.
+  withForm([], "Everything for this turn is in the file attached to this message.", "false");
+  assert.strictEqual(CGPT.attachmentReady("c2c-abc.txt").ready, false);
+});
+
+test("a chip whose name only appears in prose is not a chip", () => {
+  withForm([], "I will read c2c-abc.txt shortly", "false");
+  assert.strictEqual(CGPT.attachmentReady("c2c-abc.txt").ready, false,
+    "prose mentioning the name must not pass for an attachment");
+});
+
+test("sentWithAttachment fails when the turn is only our note", () => {
+  const note = "Everything for this turn is in the file attached to this message.";
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [{ textContent: note }],
+    body: { innerText: "" },
+  };
+  assert.strictEqual(CGPT.sentWithAttachment("c2c-abc.txt").carried, false);
+});
+
+test("sentWithAttachment passes when the turn really carries the file", () => {
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [{ textContent: "note here c2c-abc.txt" }],
+    body: { innerText: "" },
+  };
+  assert.strictEqual(CGPT.sentWithAttachment("c2c-abc.txt").carried, true);
 });

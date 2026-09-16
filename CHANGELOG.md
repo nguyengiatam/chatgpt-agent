@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.3
+
+**Fixed: both attachment guards were satisfied by the plugin's own words.** The
+note typed alongside an upload said *"the attached file c2c-db93a8e7.txt"*, and
+both guards search the turn for that filename. `sentWithAttachment` found it in
+our own sentence, so it could never fail. `hasChip` had an `innerText` fallback
+and the composer held the same sentence, so the fail-closed gate 0.2.2 built
+could never close. A turn of 210 characters carrying no file card passed both.
+
+Two changes, either of which fixes it, and both are in:
+
+- The note no longer names the file. Every occurrence of the name in a turn or
+  a composer now comes from the attachment card. The model never needed it — it
+  has to open the attachment, not look it up by name.
+- `hasChip` is structural only. The `innerText` fallback is gone: a name in
+  prose is not an attachment, and that was true even before our own note made
+  it worse.
+
+**The pattern is worth naming, because this was the third in a row.** Each fix
+was accepted on evidence the tool itself produced — first a guard reading an
+absence, then a guard reading a string it had written, then that guard's patch
+doing the same. The common cause was not any of the three bugs: it was that
+every fix was verified only against the case where things work. None had a test
+proving the guard could fail. This release adds those, and the 0.2.2 test that
+asserted the `innerText` fallback — encoding the hole as intended behaviour —
+is inverted.
+
 ## 0.2.2
 
 **Fixed: a turn could be sent without the file it referred to.** The gate before

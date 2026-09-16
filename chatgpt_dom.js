@@ -292,13 +292,20 @@
     return { ok: true, ready: hasChip(name), reason: hasChip(name) ? null : "chip-gone" };
   }
 
+  // Structural only. There used to be an innerText fallback here, and it made
+  // the gate unfalsifiable twice over: the composer held our own note, which
+  // named the file, so the string was always present - and even without that,
+  // any sentence mentioning the name would have passed for an attachment.
+  // A chip is a labelled control or it is not a chip.
   function hasChip(name) {
     var form = document.querySelector("form") || document.body;
-    var labelled = form.querySelectorAll("[aria-label]");
+    var labelled = form.querySelectorAll("[aria-label], [title]");
     for (var i = 0; i < labelled.length; i++) {
-      if ((labelled[i].getAttribute("aria-label") || "").indexOf(name) !== -1) return true;
+      var node = labelled[i];
+      var label = (node.getAttribute("aria-label") || node.getAttribute("title") || "");
+      if (label.indexOf(name) !== -1) return true;
     }
-    return (form.innerText || "").indexOf(name) !== -1;
+    return false;
   }
 
   // After sending, the file should have moved into our own turn. Checking the

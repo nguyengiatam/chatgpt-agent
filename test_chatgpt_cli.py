@@ -316,6 +316,25 @@ class NeedsAttachmentTest(unittest.TestCase):
         self.assertFalse(cgpt.needs_attachment(None))
 
 
+class AttachedNoteTest(unittest.TestCase):
+    """The typed note must not name the file.
+
+    Both attachment guards search the sent turn for the filename. When our own
+    sentence supplied it, neither could ever fail - three fixes in a row were
+    accepted on evidence the tool wrote itself.
+    """
+
+    def test_the_note_never_names_the_file(self):
+        self.assertNotIn("{name}", cgpt.ATTACHED_NOTE)
+        self.assertNotIn(".txt", cgpt.ATTACHED_NOTE)
+
+    def test_the_note_takes_no_format_arguments(self):
+        self.assertEqual(cgpt.ATTACHED_NOTE.format(), cgpt.ATTACHED_NOTE)
+
+    def test_the_note_still_tells_the_model_there_is_a_file(self):
+        self.assertIn("attached", cgpt.ATTACHED_NOTE.lower())
+
+
 class AttachmentNameTest(unittest.TestCase):
     def test_the_name_is_derived_from_the_marker(self):
         name = cgpt.attachment_name("[c2c:abcd1234]")

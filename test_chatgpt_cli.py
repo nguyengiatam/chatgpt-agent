@@ -316,6 +316,81 @@ class NeedsAttachmentTest(unittest.TestCase):
         self.assertFalse(cgpt.needs_attachment(None))
 
 
+class SendTypedTextTest(unittest.TestCase):
+    """Guard what send() actually types, not the constant it starts from.
+
+    A mutation at the concatenation site - appending " The file is <name>." when
+    building `typed` - leaves ATTACHED_NOTE untouched. A test asserting on the
+    constant stayed green while the filename was back in the turn, which is
+    exactly where it makes the post-send check a tautology again. So the
+    assertion has to read the string that left the function.
+    """
+
+    BIG = "\n".join("line %d" % n for n in range(300))
+
+    def setUp(self):
+        self.calls = []
+        self._real_eval = cgpt.eval_js
+        cgpt.eval_js = self._fake_eval
+
+    def tearDown(self):
+        cgpt.eval_js = self._real_eval
+
+    def _fake_eval(self, window_index, tab_index, expression):
+        self.calls.append(expression)
+        if expression.startswith("CGPT.attachmentReady("):
+            return {"ok": True, "ready": True}
+        if expression.startswith("CGPT.sentWithAttachment("):
+            return {"ok": True, "sent": True, "carried": True}
+        return {"ok": True, "error": None}
+
+    def _call(self, prefix):
+        for expression in self.calls:
+            if expression.startswith(prefix):
+                return expression
+        return None
+
+    def _typed(self):
+        call = self._call("CGPT.insert(")
+        return json.loads(call[len("CGPT.insert("):-1]) if call else None
+
+    def test_the_typed_text_never_carries_the_attachment_name(self):
+        marker = cgpt.send(1, 1, self.BIG)
+        self.assertNotIn(cgpt.attachment_name(marker), self._typed())
+
+    def test_the_typed_text_still_carries_the_marker(self):
+        marker = cgpt.send(1, 1, self.BIG)
+        self.assertIn(marker, self._typed())
+
+    def test_the_payload_itself_is_not_typed(self):
+        cgpt.send(1, 1, self.BIG)
+        self.assertNotIn("line 299", self._typed())
+
+    def test_the_attachment_call_does_carry_the_name(self):
+        # Proves this test exercises the attach path at all, so the assertion
+        # above is about a name that genuinely exists somewhere in the run.
+        marker = cgpt.send(1, 1, self.BIG)
+        self.assertIn(cgpt.attachment_name(marker), self._call("CGPT.attach("))
+
+    def test_a_small_prompt_is_typed_whole_and_never_attached(self):
+        marker = cgpt.send(1, 1, "review this")
+        self.assertIn("review this", self._typed())
+        self.assertIsNone(self._call("CGPT.attach("))
+
+    def test_send_refuses_when_the_turn_arrived_without_the_file(self):
+        def carried_nothing(window_index, tab_index, expression):
+            self.calls.append(expression)
+            if expression.startswith("CGPT.attachmentReady("):
+                return {"ok": True, "ready": True}
+            if expression.startswith("CGPT.sentWithAttachment("):
+                return {"ok": True, "sent": True, "carried": False}
+            return {"ok": True, "error": None}
+
+        cgpt.eval_js = carried_nothing
+        with self.assertRaises(cgpt.CliError):
+            cgpt.send(1, 1, self.BIG)
+
+
 class AttachedNoteTest(unittest.TestCase):
     """The typed note must not name the file.
 

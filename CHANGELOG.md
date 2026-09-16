@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.4
+
+**Fixed: the guard on the typed note watched the constant, not the string.**
+0.2.3 removed the filename from `ATTACHED_NOTE` and asserted that the constant
+no longer contains it. But the name is reinjectable at the concatenation site,
+and a mutation appending `" The file is " + name` there left the constant
+untouched — so the whole suite stayed green while the filename was back in the
+turn, making the post-send check a tautology again. The test now drives `send()`
+with a faked bridge and asserts on the text that actually leaves the function,
+which catches any route back in.
+
+**`sentWithAttachment` is structural too.** It scanned the turn's `textContent`,
+so it depended on our own typed text staying clean. It now looks for the file
+tile ChatGPT renders — observed live as DIV and BUTTON carrying
+`aria-label="<name>"` — sharing one `labelledWith` helper with `hasChip`.
+Neither guard reads prose any more.
+
+**Verified by mutation rather than by assertion.** Three mutations were seeded
+and each turns the suite red: reinjecting the name at the concatenation site (1
+Python failure), restoring the `innerText` fallback (2 JS failures), and
+reverting the turn scan to `textContent` (2 JS failures). That is the check
+missing from 0.2.1 through 0.2.3 — each of those was accepted because the happy
+path worked, and none demonstrated that the guard could fail.
+
 ## 0.2.3
 
 **Fixed: both attachment guards were satisfied by the plugin's own words.** The

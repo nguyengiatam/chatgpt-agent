@@ -8,7 +8,7 @@
     {
       "name": "chatgpt-agent",
       "description": "Run review and planning tasks in the ChatGPT web UI from Claude Code. Read-only by default; --allow-shell opts in to running commands. macOS and Microsoft Edge only.",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "source": "./",
       "author": {
         "name": "Nguyễn Gia Tâm"

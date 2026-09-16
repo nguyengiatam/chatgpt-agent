@@ -347,21 +347,31 @@ test("a chip whose name only appears in prose is not a chip", () => {
     "prose mentioning the name must not pass for an attachment");
 });
 
-test("sentWithAttachment fails when the turn is only our note", () => {
-  const note = "Everything for this turn is in the file attached to this message.";
-  global.document = {
-    querySelector: () => null,
-    querySelectorAll: () => [{ textContent: note }],
-    body: { innerText: "" },
+function turnWith(labels, text) {
+  const turn = {
+    textContent: text || "",
+    querySelectorAll: () => (labels || []).map((v) => ({ getAttribute: (a) => (a === "aria-label" ? v : null) })),
   };
+  global.document = { querySelector: () => null, querySelectorAll: () => [turn], body: {} };
+}
+
+test("sentWithAttachment fails when the name is only in the turn's text", () => {
+  // The turn used to be scanned with textContent.indexOf, so a filename that
+  // reached the typed note - by any route, including a later edit to the
+  // concatenation - made this guard unable to fail.
+  turnWith([], "Everything is in the attached file c2c-abc.txt");
   assert.strictEqual(CGPT.sentWithAttachment("c2c-abc.txt").carried, false);
 });
 
-test("sentWithAttachment passes when the turn really carries the file", () => {
-  global.document = {
-    querySelector: () => null,
-    querySelectorAll: () => [{ textContent: "note here c2c-abc.txt" }],
-    body: { innerText: "" },
-  };
+test("sentWithAttachment passes on the file tile ChatGPT renders", () => {
+  // Observed live: DIV and BUTTON carrying aria-label="<name>".
+  turnWith(["c2c-abc.txt"], "some prose");
   assert.strictEqual(CGPT.sentWithAttachment("c2c-abc.txt").carried, true);
+});
+
+test("sentWithAttachment reports nothing sent when there is no user turn", () => {
+  global.document = { querySelector: () => null, querySelectorAll: () => [], body: {} };
+  const state = CGPT.sentWithAttachment("c2c-abc.txt");
+  assert.strictEqual(state.sent, false);
+  assert.strictEqual(state.carried, false);
 });

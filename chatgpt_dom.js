@@ -292,30 +292,33 @@
     return { ok: true, ready: hasChip(name), reason: hasChip(name) ? null : "chip-gone" };
   }
 
-  // Structural only. There used to be an innerText fallback here, and it made
-  // the gate unfalsifiable twice over: the composer held our own note, which
-  // named the file, so the string was always present - and even without that,
-  // any sentence mentioning the name would have passed for an attachment.
-  // A chip is a labelled control or it is not a chip.
-  function hasChip(name) {
-    var form = document.querySelector("form") || document.body;
-    var labelled = form.querySelectorAll("[aria-label], [title]");
-    for (var i = 0; i < labelled.length; i++) {
-      var node = labelled[i];
-      var label = (node.getAttribute("aria-label") || node.getAttribute("title") || "");
+  // Structural only, for both guards. There used to be an innerText fallback
+  // here and a plain textContent scan below, and between them the filename our
+  // own note carried satisfied everything: the composer held the note, and so
+  // did the sent turn. A name in prose is not an attachment. A labelled
+  // control is.
+  function labelledWith(root, name) {
+    if (!root || !name) return false;
+    var nodes = root.querySelectorAll("[aria-label], [title]");
+    for (var i = 0; i < nodes.length; i++) {
+      var label = nodes[i].getAttribute("aria-label") || nodes[i].getAttribute("title") || "";
       if (label.indexOf(name) !== -1) return true;
     }
     return false;
   }
 
-  // After sending, the file should have moved into our own turn. Checking the
-  // message rather than the model's wording keeps this independent of what
-  // ChatGPT says and of what language it says it in.
+  function hasChip(name) {
+    return labelledWith(document.querySelector("form") || document.body, name);
+  }
+
+  // After sending, the file should have moved into our own turn as a tile -
+  // observed live as DIV/BUTTON carrying aria-label="<name>". Reading the
+  // structure rather than the text keeps this independent of what ChatGPT
+  // says, what language it says it in, and what we ourselves typed.
   function sentWithAttachment(name) {
     var users = document.querySelectorAll('[data-message-author-role="user"]');
     if (!users.length) return { ok: true, sent: false, carried: false };
-    var last = users[users.length - 1];
-    return { ok: true, sent: true, carried: (last.textContent || "").indexOf(name) !== -1 };
+    return { ok: true, sent: true, carried: labelledWith(users[users.length - 1], name) };
   }
 
   // One poll sample: everything the Python side needs to decide "is it done?".
@@ -349,6 +352,7 @@
     attach: attach,
     attachmentReady: attachmentReady,
     hasChip: hasChip,
+    labelledWith: labelledWith,
     sentWithAttachment: sentWithAttachment,
     sendBlocked: sendBlocked,
     submit: submit,

@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.0
+
+**New: `--write`, an implement mode.** The bridge could already change a tree —
+`--allow-shell` runs real commands, and a command can write a file — but
+everything pointed the other way: the shell briefing told the model to *"work
+in the copy, not in the workspace itself"*, the only presets were `review` and
+`plan`, and the refusal text called anything unusual "out of scope for a
+review". So a run that was meant to build something spent its first rounds
+arguing with its own instructions.
+
+`--write` implies `--allow-shell`, loads the new `implement` preset, and swaps
+the shell briefing for one that says the workspace is the target: edit it, build
+it, test it, commit on the branch that is checked out. Pushing, publishing,
+merging and history rewrites stay refused, so the result is local and reviewable.
+Deliberate breaks — seeding a mutation to prove a new test actually fails — still
+belong in a copy under /tmp, and the briefing says so.
+
+**New: the run states the workspace facts up front.** A measured implement run
+spent two of eleven rounds discovering where `node_modules` lived, and guessed
+the parent directory first. The opening message now carries what the bridge can
+establish cheaply: branch and HEAD, whether the worktree is clean, whether Node
+dependencies are installed and where, which of `test`/`build`/`lint`/`typecheck`
+exist in `package.json`, and which toolchain markers are present. Facts only —
+anything that cannot be established is left out rather than guessed.
+
+**Changed: refusals name the role they are refusing for.** `shell_objection`
+takes a `role`, so an implement run is told to commit locally rather than to
+"work in a copy". The commands refused are unchanged: pushing, escalating and
+reaching another host belong to no role this tool offers.
+
+**Changed: `--preset` now defaults late.** It parses as `None` and resolves to
+`implement` under `--write`, `review` otherwise, so naming a preset explicitly
+still wins.
+
+**Refactor:** the argument parser moved out of `main()` into `build_parser()`,
+which is what let the defaulting rule be tested rather than asserted.
+
+
 ## 0.2.5
 
 **Fixed: the first attach on a freshly navigated chat was dropped.** React has

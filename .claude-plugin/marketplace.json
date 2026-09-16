@@ -8,10 +8,10 @@
     {
       "name": "chatgpt-agent",
       "displayName": "ChatGPT Agent",
-      "description": "Run review and planning tasks in the ChatGPT web UI from Claude Code. Read-only by default; --allow-shell opts in to running commands. macOS and Microsoft Edge only.",
+      "description": "Delegate review, planning and implementation to the ChatGPT web UI from Claude Code. Read-only by default; --allow-shell runs commands; --write lets it edit, test and commit. macOS and Microsoft Edge only.",
       "category": "development",
       "source": "./",
-      "version": "0.2.5",
+      "version": "0.3.0",
       "author": {
         "name": "Nguyễn Gia Tâm"
       },
@@ -20,6 +20,7 @@
         "chatgpt",
         "code-review",
         "planning",
+        "implementation",
         "macos",
         "applescript"
       ]

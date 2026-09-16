@@ -95,6 +95,85 @@ class OpeningMessageTest(unittest.TestCase):
         self.assertIn("printed on the operator's terminal", message)
 
 
+class WriteModeTest(unittest.TestCase):
+    def test_write_mode_says_the_workspace_itself_is_the_target(self):
+        message = agent.opening_message("x", "/tmp", "y", shell=True, write=True)
+        self.assertIn("IMPLEMENT run", message)
+        self.assertIn("commit", message)
+
+    def test_write_mode_replaces_the_review_shell_briefing(self):
+        message = agent.opening_message("x", "/tmp", "y", shell=True, write=True)
+        # The review briefing tells the model to stay out of the workspace;
+        # saying that in an implement run would contradict the task.
+        self.assertNotIn("Work in the copy, not in the workspace itself", message)
+
+    def test_write_mode_still_keeps_the_break_in_a_copy(self):
+        message = agent.opening_message("x", "/tmp", "y", shell=True, write=True)
+        self.assertIn("/tmp", message)
+        self.assertIn("mutation", message)
+
+    def test_write_mode_refuses_to_publish(self):
+        message = agent.opening_message("x", "/tmp", "y", shell=True, write=True)
+        for refused in ("pushing", "merging", "rewriting history"):
+            self.assertIn(refused, message)
+
+    def test_the_parser_leaves_the_preset_unset_so_write_can_choose_it(self):
+        parsed = agent.build_parser().parse_args(["--write", "do it"])
+        self.assertIsNone(parsed.preset)
+        self.assertTrue(parsed.write)
+        plain = agent.build_parser().parse_args(["do it"])
+        self.assertIsNone(plain.preset)
+        self.assertFalse(plain.write)
+
+    def test_an_implement_preset_ships_with_the_plugin(self):
+        body = agent.load_preset("implement")
+        self.assertIn("commit", body.lower())
+
+
+class WorkspaceFactsTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_a_bare_directory_yields_no_invented_facts(self):
+        self.assertEqual(agent.workspace_facts(self.dir), [])
+
+    def test_it_reports_the_branch_and_head_of_a_repo(self):
+        subprocess.run(["git", "init", "-q"], cwd=self.dir, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=self.dir, check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=self.dir, check=True)
+        open(os.path.join(self.dir, "a.txt"), "w").write("hi\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.dir, check=True)
+        subprocess.run(["git", "commit", "-qm", "one"], cwd=self.dir, check=True)
+        facts = " | ".join(agent.workspace_facts(self.dir))
+        self.assertIn("on branch", facts)
+        self.assertIn("worktree clean", facts)
+
+    def test_it_says_when_node_dependencies_are_missing(self):
+        open(os.path.join(self.dir, "package.json"), "w").write(
+            json.dumps({"scripts": {"test": "jest", "build": "tsc"}}))
+        facts = " | ".join(agent.workspace_facts(self.dir))
+        self.assertIn("NOT installed", facts)
+        self.assertIn("test", facts)
+
+    def test_it_says_where_node_dependencies_live_when_present(self):
+        open(os.path.join(self.dir, "package.json"), "w").write("{}")
+        os.makedirs(os.path.join(self.dir, "node_modules"))
+        facts = " | ".join(agent.workspace_facts(self.dir))
+        self.assertIn("node_modules", facts)
+        self.assertNotIn("NOT installed", facts)
+
+    def test_facts_reach_the_opening_message(self):
+        message = agent.opening_message("x", "/tmp/repo", "y", facts=["on branch main at abc123"])
+        self.assertIn("on branch main at abc123", message)
+
+    def test_facts_do_not_leak_the_command_op_into_a_read_only_run(self):
+        message = agent.opening_message("x", "/tmp/repo", "y", facts=["Go module"])
+        self.assertNotIn("shell", message)
+
+
 class SessionStoreTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

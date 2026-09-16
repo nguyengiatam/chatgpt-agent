@@ -194,27 +194,36 @@ _OUT_OF_ROLE = [
 _OUT_OF_ROLE = [(re.compile(pattern, re.IGNORECASE), why) for pattern, why in _OUT_OF_ROLE]
 
 
-def shell_objection(cmd):
-    """Why this command is not a reviewer's to run, or None.
+_ROLE_ADVICE = {
+    "review": ("a review", "Work in a copy and keep to reading, editing that copy, "
+                           "and running its tests."),
+    "implement": ("this task", "Edit the workspace, build it, test it and commit; "
+                               "leave the result local and seed any deliberate break "
+                               "in a copy under /tmp."),
+}
+
+
+def shell_objection(cmd, role="review"):
+    """Why this command is out of role, or None.
 
     Matched against the whole string, so a refusal hidden behind `&&` is still
-    caught. Not a sandbox - see the note above.
+    caught. Not a sandbox - see the note above. `role` only changes the advice
+    in the refusal: the same commands are refused either way, because pushing,
+    escalating and reaching another host belong to no role this tool offers.
     """
+    what, advice = _ROLE_ADVICE.get(role, _ROLE_ADVICE["review"])
     text = " " + " ".join((cmd or "").split())
     for pattern, why in _OUT_OF_ROLE:
         if pattern.search(text):
-            return (
-                "refused: " + why + " is out of scope for a review. Work in a copy "
-                "and keep to reading, editing that copy, and running its tests."
-            )
+            return "refused: " + why + " is out of scope for " + what + ". " + advice
     return None
 
 
-def _op_shell(root, op, limit):
+def _op_shell(root, op, limit, role="review"):
     cmd = op.get("cmd")
     if not cmd:
         raise OpError('missing "cmd"')
-    objection = shell_objection(str(cmd))
+    objection = shell_objection(str(cmd), role)
     if objection:
         raise OpError(objection)
 
@@ -494,7 +503,7 @@ def available_ops(allow_shell=False):
     return ALLOWED_OPS + (("shell",) if allow_shell else ())
 
 
-def execute(root, op, limit=None, allow_shell=False):
+def execute(root, op, limit=None, allow_shell=False, role="review"):
     """Run one op, always returning a result dict - never raising at the caller.
 
     `limit` is the caller's remaining data budget for this round; it only ever
@@ -502,6 +511,7 @@ def execute(root, op, limit=None, allow_shell=False):
 
     `allow_shell` decides whether the shell op exists at all. Left off, it is
     not a refused op but an unknown one, and the model is never told about it.
+    `role` only reaches the shell op, where it words the refusal.
     """
     limit = MAX_CHARS if limit is None else min(int(limit), MAX_CHARS)
     name = str(op.get("op") or "")
@@ -513,6 +523,8 @@ def execute(root, op, limit=None, allow_shell=False):
                      + ", ".join(available_ops(allow_shell)),
         }
     try:
+        if handler is _op_shell:
+            return handler(root, op, limit, role)
         return handler(root, op, limit)
     except OpError as exc:
         return {"label": name + " " + str(op.get("path") or op.get("pattern") or ""), "error": str(exc)}

@@ -349,11 +349,46 @@ Three things bound it, and it is worth being exact about which is which:
 So: read-only by construction, or shell because you asked for it. There is no
 third state where shell is on and the bridge is still a fence.
 
+### `--write`: implementing, not reviewing
+
+`--allow-shell` makes changing the tree *possible*; everything else in a review
+run points away from it, and a model given a build task spends its first rounds
+arguing with its own briefing. `--write` is the mode that says the workspace is
+the target:
+
+```bash
+./chatgpt-agent.py --write --session add-retry \
+  "Implement the brief at docs/plans/retry.md. Branch is already checked out."
+```
+
+It implies `--allow-shell` and loads the `implement` preset, which asks for the
+smallest change that satisfies the task, the full suite rather than a filtered
+subset, and a commit on the branch that is already checked out. There is no
+separate write op: the model writes files the way you would at a terminal, with
+a heredoc or an editor command.
+
+What stays refused is what a local change has no business doing — pushing,
+publishing, merging to the default branch, rewriting history — so the result
+sits in your worktree for you to read before it goes anywhere. Deliberate
+breaks still belong in a copy under `/tmp`: seeding a mutation to prove a new
+test really fails is part of the job, leaving the workspace holding that
+mutation is not.
+
+The run also opens with the facts it would otherwise burn rounds discovering —
+branch and HEAD, whether the worktree is clean, whether Node dependencies are
+installed and where, which scripts `package.json` defines, which toolchain
+markers are present. Facts only; anything that cannot be established is left
+out rather than guessed at.
+
+Two things it does not change. A green suite is evidence about the suite, not
+about the change — read the diff. And the bridge still drives one browser tab,
+so runs stay one at a time.
+
 ## Flags
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--preset` | `review` | which preset to load |
+| `--preset` | `review`, or `implement` with `--write` | which preset to load |
 | `--workspace` | cwd | repo to expose; resolved to its git root |
 | `--session` | none | name a conversation to reuse across runs |
 | `--new` | off | start a fresh chat for that session name |
@@ -362,6 +397,7 @@ third state where shell is on and the bridge is still a fence.
 | `--max-chars` | `250000` | workspace data served across the whole run |
 | `--round-chars` | `80000` | workspace data served in one round |
 | `--allow-shell` | off | add the op that runs commands on your machine |
+| `--write` | off | implement mode: edit, test and commit the workspace (implies `--allow-shell`) |
 | `--retries` | `3` | attempts per exchange before giving up |
 | `--resume` | off | continue the interrupted run for this session |
 | `--timeout` | `300` | seconds per reply |

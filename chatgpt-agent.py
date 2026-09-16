@@ -108,6 +108,36 @@ reading credentials are refused - none of them are a reviewer's work. Every
 command you send is printed on the operator's terminal before it runs.
 """
 
+WRITE_PROTOCOL = """\
+This run also offers one more op:
+
+    {"op":"shell","cmd":"<command>","cwd":"<dir>","timeout":<seconds>}
+
+It runs a real command on this machine, as the user who started the run, and
+`cwd` is wherever you say.
+
+This is an IMPLEMENT run, not a review: you are expected to change the
+workspace itself. Edit its files, run its build and its tests, and commit on
+the branch that is already checked out. Write the files with the tools you
+would use at a terminal - a heredoc, `python3 - <<'PY'`, `sed`, an editor
+command - there is no separate write op.
+
+Two things stay outside the workspace. Seed a mutation, or any experiment whose
+point is to break something, in a copy under /tmp; the workspace must never be
+left holding a deliberate break. And leave the result committed but local:
+pushing, publishing, merging to the default branch and rewriting history are
+refused.
+
+Before you finish: the build and the tests must pass, the work must be
+committed, and `git status` must be clean. Report the commit SHA and the files
+you changed.
+
+Deleting trees, escalating privileges, publishing, reaching another host and
+reading credentials are refused. Every command you send is printed on the
+operator's terminal before it runs.
+"""
+
+
 DATA_SPENT = (
     "The data budget for this run is spent; no further file contents can be "
     "served. Conclude with what you have and say what you could not verify."
@@ -190,6 +220,63 @@ def workspace_root(given):
     return start
 
 
+def _first_line(argv, root):
+    try:
+        out = subprocess.run(argv, cwd=root, capture_output=True, text=True)
+    except OSError:
+        return ""
+    return out.stdout.strip().splitlines()[0].strip() if out.returncode == 0 and out.stdout.strip() else ""
+
+
+def workspace_facts(root):
+    """The handful of facts a run otherwise burns rounds discovering.
+
+    Kept to what the bridge can answer cheaply and the model cannot guess:
+    where the repo is, what it is sitting on, and which toolchain is installed
+    where. A fact we cannot establish is left out rather than guessed at.
+    """
+    facts = []
+
+    branch = _first_line(["git", "rev-parse", "--abbrev-ref", "HEAD"], root)
+    head = _first_line(["git", "rev-parse", "--short", "HEAD"], root)
+    if branch and head:
+        try:
+            out = subprocess.run(["git", "status", "--porcelain"], cwd=root,
+                                 capture_output=True, text=True)
+            dirty = len([ln for ln in out.stdout.splitlines() if ln.strip()])
+        except OSError:
+            dirty = 0
+        facts.append("on branch " + branch + " at " + head + ", "
+                     + ("worktree clean" if dirty == 0
+                        else str(dirty) + " uncommitted path(s)"))
+
+    if os.path.isfile(os.path.join(root, "package.json")):
+        installed = os.path.isdir(os.path.join(root, "node_modules"))
+        facts.append("Node project; dependencies are "
+                     + ("installed at <root>/node_modules"
+                        if installed else "NOT installed - run the install first"))
+        try:
+            with open(os.path.join(root, "package.json")) as handle:
+                scripts = (json.load(handle) or {}).get("scripts") or {}
+        except (IOError, OSError, ValueError):
+            scripts = {}
+        named = [k for k in ("test", "build", "lint", "typecheck") if k in scripts]
+        if named:
+            facts.append("package.json scripts: " + ", ".join(named))
+
+    for marker, what in (
+        ("pyproject.toml", "Python project (pyproject.toml)"),
+        ("requirements.txt", "Python requirements.txt"),
+        ("go.mod", "Go module"),
+        ("Cargo.toml", "Rust crate"),
+        ("Makefile", "Makefile present"),
+    ):
+        if os.path.isfile(os.path.join(root, marker)):
+            facts.append(what)
+
+    return facts
+
+
 # --- browser ---------------------------------------------------------------
 
 
@@ -257,13 +344,21 @@ def load_preset(name):
         return handle.read().strip()
 
 
-def opening_message(preset, root, task, shell=False):
+def opening_message(preset, root, task, shell=False, write=False, facts=None):
+    extra = ""
+    if write:
+        extra = "\n" + WRITE_PROTOCOL
+    elif shell:
+        extra = "\n" + SHELL_PROTOCOL
+    where = "Workspace root: " + root
+    if facts:
+        where += "\n" + "\n".join("- " + fact for fact in facts)
     return "\n\n".join([
-        PROTOCOL + ("\n" + SHELL_PROTOCOL if shell else ""),
+        PROTOCOL + extra,
         "---",
         preset,
         "---",
-        "Workspace root: " + root,
+        where,
         "Task: " + task,
     ])
 
@@ -296,10 +391,14 @@ def run(args, log, progress):
         root = workspace_root(args.workspace)
         preset = load_preset(args.preset)
         saved = load_sessions().get(args.session) if (args.session and not args.new) else None
-        log("workspace: " + root)
+        facts = workspace_facts(root)
+        log("workspace: " + root + (" (write)" if args.write else ""))
+        for fact in facts:
+            log("  " + fact)
         log("conversation: " + (saved or "new chat"))
         goto(window, tab, saved or NEW_CHAT_URL, args.timeout)
-        message = opening_message(preset, root, args.task, args.allow_shell)
+        message = opening_message(preset, root, args.task, args.allow_shell,
+                                  write=args.write, facts=facts)
         first_round, reply = 1, None
 
     bad_format = 0
@@ -361,7 +460,8 @@ def run(args, log, progress):
                 # Printed before it runs: the operator sees every command,
                 # even though the loop itself is unattended.
                 log("  $ " + " ".join(str(op.get("cmd") or "").split())[:160])
-            result = ops.execute(root, op, limit=room, allow_shell=args.allow_shell)
+            result = ops.execute(root, op, limit=room, allow_shell=args.allow_shell,
+                                 role=("implement" if args.write else "review"))
             budget.charge(len(result.get("body") or ""))
             results.append(result)
 
@@ -392,12 +492,14 @@ def run(args, log, progress):
 # --- cli -------------------------------------------------------------------
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(
-        description="Run a read-only, multi-turn workspace task in the ChatGPT web UI."
+        description="Run a multi-turn workspace task in the ChatGPT web UI - "
+                    "read-only by default, or editing and committing with --write."
     )
     parser.add_argument("words", nargs="*", help="the task; omit to read stdin")
-    parser.add_argument("--preset", default="review", help="preset name (default: review)")
+    parser.add_argument("--preset", default=None,
+                        help="preset name (default: review, or implement with --write)")
     parser.add_argument("--workspace", default=None, help="repo to expose (default: cwd)")
     parser.add_argument("--session", default=None, help="name a conversation to reuse")
     parser.add_argument("--new", action="store_true", help="start a fresh chat for --session")
@@ -409,6 +511,9 @@ def main(argv=None):
                         help="workspace data served per round (default: %d)" % ROUND_CHARS)
     parser.add_argument("--allow-shell", action="store_true",
                         help="let ChatGPT run commands on this machine (off by default)")
+    parser.add_argument("--write", action="store_true",
+                        help="implement mode: ChatGPT may change and commit the workspace "
+                             "(implies --allow-shell, and defaults --preset to 'implement')")
     parser.add_argument("--retries", type=int, default=3,
                         help="attempts per exchange before giving up (default: 3)")
     parser.add_argument("--resume", action="store_true",
@@ -419,6 +524,11 @@ def main(argv=None):
     parser.add_argument("--quiet", action="store_true", help="no progress on stderr")
     parser.add_argument("--list-sessions", action="store_true", help="print saved sessions and exit")
     parser.add_argument("--forget", default=None, help="drop a saved session and exit")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.list_sessions:
@@ -439,6 +549,13 @@ def main(argv=None):
             json.dump(sessions, handle, indent=2)
         print("forgot " + args.forget)
         return 0
+
+    # --write is implement mode: it needs the command op, and its own preset
+    # unless the caller named one.
+    if args.write:
+        args.allow_shell = True
+    if args.preset is None:
+        args.preset = "implement" if args.write else "review"
 
     args.task = cgpt.read_prompt(args.words)
     if not args.task and not args.resume:

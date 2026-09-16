@@ -22,7 +22,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/chatgpt-agent.py" --preset review [flags] "<task>
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--preset` | `review` | `review` or `plan`; a preset is a file in `presets/` |
+| `--preset` | `review`, or `implement` with `--write` | `review`, `plan` or `implement`; a preset is a file in `presets/` |
 | `--workspace` | cwd | repository to expose, resolved to its git root |
 | `--session` | none | resume a named conversation; omit for a fresh chat |
 | `--new` | off | start that session over |
@@ -31,6 +31,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/chatgpt-agent.py" --preset review [flags] "<task>
 | `--max-chars` | `250000` | workspace data served across the run |
 | `--round-chars` | `80000` | workspace data served in one round |
 | `--allow-shell` | off | add the op that runs commands on this machine |
+| `--write` | off | implement mode: edit, test and commit the workspace (implies `--allow-shell`, preset `implement`) |
 | `--retries` | `3` | attempts per exchange before giving up |
 | `--resume` | off | continue this session's interrupted run |
 | `--timeout` | `300` | seconds to wait for one reply |
@@ -52,6 +53,12 @@ under each failure. Two of them are permissions only the user can grant, and
 signing in is never automated.
 
 ## One run at a time
+
+There is no parallel mode, and adding one is not a matter of launching two
+processes. `ensure_tab` takes the **first** ChatGPT tab it finds and `goto`
+navigates that same tab, so a second run steers the first one's conversation
+out from under it. Supporting parallel runs would mean pinning each run to its
+own tab and claiming it, which the bridge does not do today.
 
 The bridge drives a single browser tab. While a reply is generating, the send
 button is a stop button, so a second run started mid-stream fails with *Could
@@ -87,14 +94,28 @@ exist and what they cover, tracing how a change propagates, writing a plan.
 **Needs `--allow-shell`:** anything whose answer is an observation rather than a
 reading — did the suite go red, does this reproduce, what does the build say.
 
-**Does not fit at all:** changing the workspace itself. The bridge works in
-copies. If the outcome is an edit to the real tree, that belongs to Claude.
+**Needs `--write`:** changing the workspace itself — implementing a brief,
+adding the tests that pin a behaviour, carrying out a refactor. `--write`
+implies `--allow-shell`, loads the `implement` preset and tells the model the
+workspace is the target: edit it, build it, test it, commit on the branch that
+is checked out. Pushing, publishing, merging and history rewrites stay refused,
+so the result is local and reviewable.
+
+**Does not fit at all:** anything whose outcome has to leave this machine, and
+anything you would not review before keeping. The run commits; it does not get
+the last word on whether the change is right.
 
 For a gate — "GO only if these four mutants go red" — prefer splitting it even
 when shell is available: have ChatGPT *design* the mutations, let Claude Code
 run them, then feed the results back with `--session` for the verdict. Not for
 safety, but because the party being gated should not also be the party holding
 the evidence. The `go test` output is then a record anyone can re-check.
+
+The same split applies to `--write`: the run that writes the code is not the
+run that certifies it. Take the commit it produces and gate it separately —
+re-seed the mutations yourself against its commit and confirm the new tests go
+red. Measured on one implement run, that check is what turned "it says the
+tests pin this" into evidence.
 
 ## Attachments
 

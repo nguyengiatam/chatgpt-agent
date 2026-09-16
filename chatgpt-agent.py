@@ -51,6 +51,12 @@ ROUND_CHARS = 80000
 WRITE_RUN_CHARS = 700000
 WRITE_ROUND_CHARS = 120000
 
+# Rounds, too. A review converges in three to eight exchanges; an implement run
+# reads, edits, builds, tests, seeds a mutation and commits, and each of those
+# is at least one exchange. Measured: a real task ran out at 24 and still had
+# the full verification pass left.
+WRITE_MAX_ROUNDS = 36
+
 RETRY_PAUSE = 2.0
 RECOVER_TIMEOUT = 25.0
 
@@ -110,6 +116,26 @@ Rules:
 BUDGET_SPENT = (
     "Your query budget is spent. Give your final answer now, using only what you "
     "already have, and note anything you could not verify. Do not emit a c2c block."
+)
+
+# In write mode the same message is a trap: the deliverable is a commit, and
+# committing needs an op, so "do not emit a c2c block" forbids the only way to
+# land the work. Measured: a run spent 24 rounds, did the work, and left 16
+# modified paths uncommitted because the exhaustion path gave it no way to save
+# them. Write mode therefore gets one landing round, for committing only.
+LANDING_ROUND = (
+    "Your query budget is spent. You have ONE more exchange, and it is for landing "
+    "the work, not for more investigation.\n\n"
+    "If you have uncommitted changes, reply with a single c2c block whose commands "
+    "only stage and commit them on the current branch - no new edits, no further "
+    "reading. Say in the commit message that the task is incomplete if it is.\n\n"
+    "If there is nothing to commit, reply with no c2c block and give your final "
+    "answer, saying plainly what is done and what is not."
+)
+
+LANDED = (
+    "That was the landing round. Give your final answer now, with no c2c block: "
+    "the commit SHA if you made one, what is done, and what is left."
 )
 
 SHELL_PROTOCOL = """\
@@ -514,6 +540,34 @@ def run(args, log, progress):
             "spent": budget.spent, "pending_message": message, "marker": None,
         })
 
+    if args.write:
+        # One last exchange, for committing only. Without it the work of the
+        # whole run stays in the worktree and dies with the session.
+        log("round budget spent - offering a landing round to commit")
+        marker = attempt("send", args.retries, log, lambda: cgpt.send(window, tab, LANDING_ROUND))
+        reply = attempt("wait", args.retries, log,
+                        lambda: cgpt.wait_for_reply(window, tab, marker, args.timeout, args.poll))
+        try:
+            requested = proto.extract_ops(reply)
+        except proto.ProtocolError:
+            requested = []
+        if requested:
+            budget.begin_round()
+            results = []
+            for op in requested:
+                if op.get("op") == "shell":
+                    log("  $ " + " ".join(str(op.get("cmd") or "").split())[:160])
+                result = ops.execute(root, op, limit=budget.allowance(),
+                                     allow_shell=args.allow_shell, role="implement")
+                budget.charge(len(result.get("body") or ""))
+                results.append(result)
+            marker = attempt("send", args.retries, log, lambda: cgpt.send(
+                window, tab, proto.format_results(results) + "\n\n" + LANDED))
+            reply = attempt("wait", args.retries, log,
+                            lambda: cgpt.wait_for_reply(window, tab, marker, args.timeout, args.poll))
+        clear_run(name)
+        return reply
+
     log("round budget spent - asking for a conclusion")
     marker = attempt("send", args.retries, log, lambda: cgpt.send(window, tab, BUDGET_SPENT))
     answer = attempt("wait", args.retries, log,
@@ -537,7 +591,8 @@ def build_parser():
     parser.add_argument("--session", default=None, help="name a conversation to reuse")
     parser.add_argument("--new", action="store_true", help="start a fresh chat for --session")
     parser.add_argument("--out", default=None, help="also write the answer to this file")
-    parser.add_argument("--max-rounds", type=int, default=8, help="query budget (default: 8)")
+    parser.add_argument("--max-rounds", type=int, default=None,
+                        help="query budget (default: 8, or %d with --write)" % WRITE_MAX_ROUNDS)
     parser.add_argument("--max-chars", type=int, default=None,
                         help="workspace data served per run (default: %d, or %d with --write)"
                              % (RUN_CHARS, WRITE_RUN_CHARS))
@@ -591,6 +646,8 @@ def main(argv=None):
         args.allow_shell = True
     if args.preset is None:
         args.preset = "implement" if args.write else "review"
+    if args.max_rounds is None:
+        args.max_rounds = WRITE_MAX_ROUNDS if args.write else 8
     if args.max_chars is None:
         args.max_chars = WRITE_RUN_CHARS if args.write else RUN_CHARS
     if args.round_chars is None:

@@ -171,7 +171,7 @@ ranges over `cat` on large reference files.
 | `--session` | none | name a conversation to reuse across runs |
 | `--new` | off | start a fresh chat for that session name |
 | `--out` | none | also write the answer to a file |
-| `--max-rounds` | `8` | query budget before a conclusion is demanded |
+| `--max-rounds` | `8`, or `36` with `--write` | query budget before a conclusion is demanded |
 | `--max-chars` | `250000`, or `700000` with `--write` | workspace data served across the whole run |
 | `--round-chars` | `80000`, or `120000` with `--write` | workspace data served in one round |
 | `--allow-shell` | off | add the op that runs commands on your machine |

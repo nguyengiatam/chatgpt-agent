@@ -28,7 +28,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/chatgpt-agent.py" --preset review [flags] "<task>
 | `--session` | none | resume a named conversation; omit for a fresh chat |
 | `--new` | off | start that session over |
 | `--out` | none | also write the answer to a file |
-| `--max-rounds` | `8` | query budget before a conclusion is demanded |
+| `--max-rounds` | `8`, `36` with `--write` | query budget before a conclusion is demanded |
 | `--max-chars` | `250000`, `700000` with `--write` | workspace data served across the run |
 | `--round-chars` | `80000`, `120000` with `--write` | workspace data served in one round |
 | `--allow-shell` | off | add the op that runs commands on this machine |
@@ -111,6 +111,12 @@ when shell is available: have ChatGPT *design* the mutations, let Claude Code
 run them, then feed the results back with `--session` for the verdict. Not for
 safety, but because the party being gated should not also be the party holding
 the evidence. The `go test` output is then a record anyone can re-check.
+
+⚠ **An implement run ends with a landing round.** When the rounds run out, write
+mode gets one last exchange for staging and committing what is already there —
+because the review ending ("give your final answer, no c2c block") forbids the
+only way to save the work, and a run that obeys it leaves everything in the
+worktree.
 
 ⚠ **An implement run's real ceiling is the data budget, not `--max-rounds`.**
 The first one measured spent a review's 250,000 characters inside four rounds —

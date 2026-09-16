@@ -140,6 +140,26 @@ class WriteModeTest(unittest.TestCase):
         self.assertIn("worktree", agent.DATA_SPENT_WRITE)
         self.assertIn("Do not claim the task is done", agent.DATA_SPENT_WRITE)
 
+    def test_write_mode_gets_more_rounds_than_a_review(self):
+        # A review converges in three to eight exchanges. An implement run that
+        # reads, edits, builds, tests, mutates and commits needs each of those
+        # as at least one exchange; a real task ran out at 24.
+        parsed = agent.build_parser().parse_args(["--write", "x"])
+        self.assertIsNone(parsed.max_rounds)
+        self.assertGreater(agent.WRITE_MAX_ROUNDS, 8)
+
+    def test_an_exhausted_write_run_is_given_a_way_to_commit(self):
+        # BUDGET_SPENT forbids a c2c block, and committing needs one. Applied to
+        # an implement run that is exactly the instruction that loses the work.
+        self.assertIn("Do not emit a c2c block", agent.BUDGET_SPENT)
+        self.assertIn("c2c block", agent.LANDING_ROUND)
+        self.assertIn("commit", agent.LANDING_ROUND)
+        self.assertNotIn("Do not emit a c2c block", agent.LANDING_ROUND)
+
+    def test_the_landing_round_forbids_new_work(self):
+        for banned in ("no new edits", "no further"):
+            self.assertIn(banned, agent.LANDING_ROUND)
+
     def test_an_implement_preset_ships_with_the_plugin(self):
         body = agent.load_preset("implement")
         self.assertIn("commit", body.lower())

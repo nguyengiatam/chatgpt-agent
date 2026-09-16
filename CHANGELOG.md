@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.2
+
+**Fixed: an implement run that ran out of rounds could not save its work.**
+`BUDGET_SPENT` ends a run with "give your final answer now, do not emit a c2c
+block" — correct for a review, where the answer *is* the deliverable. In write
+mode the deliverable is a commit, and committing needs an op, so that
+instruction forbids the only way to land anything. Measured: a run spent all 24
+rounds, wired three modules, fixed two startup crashes and added a real gRPC
+integration test, then left 16 modified paths uncommitted because it had no way
+to save them.
+
+Write mode now gets a landing round: one last exchange whose only permitted
+commands stage and commit what is already there, with new edits and further
+reading explicitly refused, followed by a final answer carrying the SHA.
+
+**Changed: `--write` raises the round ceiling to 36.** A review converges in
+three to eight exchanges. An implement run reads, edits, builds, tests, seeds a
+mutation and commits, and each of those is at least one exchange — the same
+measured run was still mid-verification when it hit 24. `--max-rounds` still
+wins when given.
+
+
 ## 0.3.1
 
 **Fixed: `search` returned "no matches" whenever the task arrived on stdin.**

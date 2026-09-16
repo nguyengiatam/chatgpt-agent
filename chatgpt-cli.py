@@ -241,6 +241,54 @@ def attachment_name(marker):
     return "c2c-" + tag[-8:] + ".txt"
 
 
+ATTACH_TRIES = 3
+ATTACH_SETTLE = 5.0
+
+
+def _notify(line):
+    """A note on stderr. Used where silence would hide a real signal."""
+    sys.stderr.write(line + "\n")
+    sys.stderr.flush()
+
+
+def attach_payload(window_index, tab_index, payload, name, tries=ATTACH_TRIES):
+    """Upload `payload` as `name`, returning once its chip is on screen.
+
+    The first attach on a freshly navigated chat is the one that fails: React
+    has not bound its handler to the file input yet, so the change event is
+    dropped. Nothing downstream notices, because `input.files` still holds the
+    file nobody consumed - which is why this is checked by the chip appearing
+    rather than by the assignment succeeding.
+
+    Re-dispatching against the now-settled page works, and every later attach in
+    a run succeeds first time. Each retry is announced: a page that needs two
+    goes is worth seeing, and swallowing it would hide the one signal that says
+    the tab was cold.
+    """
+    for attempt in range(1, tries + 1):
+        if attempt > 1:
+            _notify("  the page had not bound its upload handler yet - "
+                    "re-attaching " + name + " (try " + str(attempt) + " of " + str(tries) + ")")
+        result = eval_js(
+            window_index, tab_index,
+            "CGPT.attach(" + js_string(payload) + ", " + js_string(name) + ")",
+        )
+        if not result.get("ok"):
+            raise CliError(
+                "Could not attach this turn's data (" + str(result.get("error")) + ")."
+            )
+        deadline = time.time() + ATTACH_SETTLE
+        while time.time() < deadline:
+            time.sleep(0.4)
+            if eval_js(window_index, tab_index, "CGPT.hasChip(" + js_string(name) + ")"):
+                return
+    raise CliError(
+        name + " never appeared in the composer after " + str(tries) + " attempts.\n"
+        "The file was handed to the page each time and the page never took it, so "
+        "nothing was sent."
+    )
+
+
 def send(window_index, tab_index, prompt):
     """Type and submit `prompt`, returning the marker that identifies it.
 
@@ -252,14 +300,7 @@ def send(window_index, tab_index, prompt):
     name = attachment_name(marker) if attached else ""
 
     if attached:
-        result = eval_js(
-            window_index, tab_index,
-            "CGPT.attach(" + js_string(prompt) + ", " + js_string(name) + ")",
-        )
-        if not result.get("ok"):
-            raise CliError(
-                "Could not attach this turn's data (" + str(result.get("error")) + ")."
-            )
+        attach_payload(window_index, tab_index, prompt, name)
         typed = marker + "\n\n" + ATTACHED_NOTE
     else:
         typed = marker + "\n\n" + prompt

@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -314,6 +315,85 @@ class NeedsAttachmentTest(unittest.TestCase):
     def test_empty_text_is_typed(self):
         self.assertFalse(cgpt.needs_attachment(""))
         self.assertFalse(cgpt.needs_attachment(None))
+
+
+class AttachPayloadTest(unittest.TestCase):
+    """The first attach on a freshly navigated chat is the one that fails.
+
+    React has not bound its handler to the file input yet, so the change event
+    is dropped - and nothing downstream notices, because input.files still
+    holds a file nobody consumed. Success is therefore the chip appearing, not
+    the assignment returning ok.
+    """
+
+    def setUp(self):
+        self.attaches = 0
+        self.chip_after = 1          # attach number from which the chip appears
+        self._real_eval = cgpt.eval_js
+        self._real_settle = cgpt.ATTACH_SETTLE
+        cgpt.eval_js = self._fake_eval
+        cgpt.ATTACH_SETTLE = 0.9
+        self.stderr = io.StringIO()
+        self._real_stderr, sys.stderr = sys.stderr, self.stderr
+
+    def tearDown(self):
+        cgpt.eval_js = self._real_eval
+        cgpt.ATTACH_SETTLE = self._real_settle
+        sys.stderr = self._real_stderr
+
+    def _fake_eval(self, window_index, tab_index, expression):
+        if expression.startswith("CGPT.attach("):
+            self.attaches += 1
+            return {"ok": True, "error": None}
+        if expression.startswith("CGPT.hasChip("):
+            return self.attaches >= self.chip_after
+        return {"ok": True, "error": None}
+
+    def test_a_warm_page_attaches_exactly_once(self):
+        cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        self.assertEqual(self.attaches, 1)
+
+    def test_a_warm_page_says_nothing(self):
+        cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        self.assertEqual(self.stderr.getvalue(), "")
+
+    def test_a_cold_page_is_re_attached_until_the_chip_appears(self):
+        self.chip_after = 2
+        cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        self.assertEqual(self.attaches, 2)
+
+    def test_every_retry_is_announced(self):
+        # Silence here would hide the only signal that says the tab was cold.
+        self.chip_after = 2
+        cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        said = self.stderr.getvalue()
+        self.assertIn("c2c-aaaa1111.txt", said)
+        self.assertIn("try 2", said)
+
+    def test_a_page_that_never_takes_the_file_raises(self):
+        self.chip_after = 99
+        with self.assertRaises(cgpt.CliError):
+            cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt", tries=2)
+
+    def test_it_gives_up_after_the_allotted_tries(self):
+        self.chip_after = 99
+        try:
+            cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt", tries=2)
+        except cgpt.CliError:
+            pass
+        self.assertEqual(self.attaches, 2)
+
+    def test_a_refused_attachment_is_not_retried_into_the_ground(self):
+        def refuses(window_index, tab_index, expression):
+            if expression.startswith("CGPT.attach("):
+                self.attaches += 1
+                return {"ok": False, "error": "file-input-not-found"}
+            return {"ok": True}
+
+        cgpt.eval_js = refuses
+        with self.assertRaises(cgpt.CliError):
+            cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        self.assertEqual(self.attaches, 1)
 
 
 class SendTypedTextTest(unittest.TestCase):

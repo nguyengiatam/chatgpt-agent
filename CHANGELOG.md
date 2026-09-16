@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.5
+
+**Fixed: the first attach on a freshly navigated chat was dropped.** React has
+not bound its handler to the file input yet, so the change event goes nowhere -
+and nothing downstream notices, because `input.files` still holds the file that
+nobody consumed. The fail-closed gate from 0.2.2 caught it correctly and
+reported `chip-gone`, but only after spending a whole round.
+
+`attach_payload` now re-dispatches, up to three times, and treats the chip
+appearing as the proof of success rather than the assignment returning ok. Every
+retry is announced on stderr: a tab that needs two goes is the one signal that
+says it was cold, and swallowing it would hide exactly that.
+
+Verified by mutation - removing the retry loop, silencing the retry, treating
+`ok` as success, and retrying past a genuine attach error each turn the suite
+red.
+
 ## 0.2.4
 
 **Fixed: the guard on the typed note watched the constant, not the string.**

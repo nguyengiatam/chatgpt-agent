@@ -268,3 +268,49 @@ test("a copy caption on a code block is not rendered either", () => {
   assert.ok(!out.includes("Sao chép"), out);
   assert.ok(out.includes("real text"));
 });
+
+// --- attachment readiness --------------------------------------------------
+// The gate must be a positive signal. Observed live: a chip present at 1s and
+// 3s was gone by 6s while the send button read unblocked either way, so
+// "button is free" alone sent a turn carrying no file.
+
+function withForm(labels, innerText, sendAttrs) {
+  const form = {
+    innerText: innerText || "",
+    querySelectorAll: () => (labels || []).map((v) => ({ getAttribute: () => v })),
+  };
+  global.document = {
+    querySelector: (sel) => (sel === "form" ? form : { disabled: false, getAttribute: () => (sendAttrs || "false") }),
+    querySelectorAll: () => [],
+    body: form,
+  };
+  return form;
+}
+
+test("ready when the chip is present and the button is free", () => {
+  withForm(["c2c-abc.txt"], "", "false");
+  assert.strictEqual(CGPT.attachmentReady("c2c-abc.txt").ready, true);
+});
+
+test("not ready while the send button is blocked", () => {
+  withForm(["c2c-abc.txt"], "", "true");
+  assert.strictEqual(CGPT.attachmentReady("c2c-abc.txt").ready, false);
+});
+
+test("not ready once the chip has gone, even with the button free", () => {
+  // This is the real failure: the upload was dropped and the button unblocked.
+  withForm([], "", "false");
+  const state = CGPT.attachmentReady("c2c-abc.txt");
+  assert.strictEqual(state.ready, false);
+  assert.strictEqual(state.reason, "chip-gone");
+});
+
+test("a chip found only in the form text also counts", () => {
+  withForm([], "Cao | c2c-abc.txt | Tai lieu", "false");
+  assert.strictEqual(CGPT.attachmentReady("c2c-abc.txt").ready, true);
+});
+
+test("with no filename the button alone decides", () => {
+  withForm([], "", "false");
+  assert.strictEqual(CGPT.attachmentReady("").ready, true);
+});

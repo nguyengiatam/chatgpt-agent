@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.2
+
+**Fixed: a turn could be sent without the file it referred to.** The gate before
+Send waited for the send button to unblock, which is a negative signal - it
+clears both when the upload finished and when ChatGPT dropped the attachment,
+and those are indistinguishable from outside. Observed live: a chip present at
+1s and 3s, gone by 6s, button reading free throughout. The message then went
+with a pointer to a file nobody had, and whatever came back was an answer about
+nothing.
+
+The gate is now positive: the chip bearing our filename must still be on screen
+*and* the button free. It fails closed - a chip that never settles times out and
+nothing is sent, so a future UI change surfaces as a timeout rather than as a
+silently empty turn.
+
+**Added a structural check after Send.** The sent user turn must carry the
+filename, or the run stops with an error naming it. Asking the message rather
+than reading the model's wording keeps this independent of what ChatGPT says,
+and of the language it says it in - and it stops an infrastructure failure from
+being mistaken for a final answer, since a reply with no c2c block otherwise
+ends the run by design.
+
+
 ## 0.2.1
 
 **Fixed: a wide payload froze the ChatGPT tab.** Reported from the first real

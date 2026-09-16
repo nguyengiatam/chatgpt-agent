@@ -276,10 +276,39 @@
     return { ok: true, error: null };
   }
 
-  // True once an upload has settled and the composer will accept the turn.
-  function attachmentReady() {
+  // Readiness must be a POSITIVE signal. aria-disabled clearing is not one:
+  // it goes false both when the upload finished and when ChatGPT gave up and
+  // removed the attachment, and those look identical from outside. Observed
+  // live - a chip present at 1s and 3s, gone by 6s, with the send button
+  // unblocked either way. Gating on that sent a turn with no file in it.
+  //
+  // So require the chip bearing our filename to still be there AND the button
+  // to be free. Missing chip means not ready, never ready-enough, so a broken
+  // selector surfaces as a timeout rather than as a message sent short.
+  function attachmentReady(name) {
     var btn = document.querySelector(SELECTORS.sendButton);
-    return { ok: true, ready: !sendBlocked(btn) };
+    if (sendBlocked(btn)) return { ok: true, ready: false, reason: "send-blocked" };
+    if (!name) return { ok: true, ready: true, reason: null };
+    return { ok: true, ready: hasChip(name), reason: hasChip(name) ? null : "chip-gone" };
+  }
+
+  function hasChip(name) {
+    var form = document.querySelector("form") || document.body;
+    var labelled = form.querySelectorAll("[aria-label]");
+    for (var i = 0; i < labelled.length; i++) {
+      if ((labelled[i].getAttribute("aria-label") || "").indexOf(name) !== -1) return true;
+    }
+    return (form.innerText || "").indexOf(name) !== -1;
+  }
+
+  // After sending, the file should have moved into our own turn. Checking the
+  // message rather than the model's wording keeps this independent of what
+  // ChatGPT says and of what language it says it in.
+  function sentWithAttachment(name) {
+    var users = document.querySelectorAll('[data-message-author-role="user"]');
+    if (!users.length) return { ok: true, sent: false, carried: false };
+    var last = users[users.length - 1];
+    return { ok: true, sent: true, carried: (last.textContent || "").indexOf(name) !== -1 };
   }
 
   // One poll sample: everything the Python side needs to decide "is it done?".
@@ -312,6 +341,8 @@
     insert: insert,
     attach: attach,
     attachmentReady: attachmentReady,
+    hasChip: hasChip,
+    sentWithAttachment: sentWithAttachment,
     sendBlocked: sendBlocked,
     submit: submit,
     state: state,

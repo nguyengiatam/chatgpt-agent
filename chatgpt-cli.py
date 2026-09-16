@@ -245,9 +245,9 @@ def send(window_index, tab_index, prompt):
     """
     marker = make_marker()
     attached = needs_attachment(prompt)
+    name = attachment_name(marker) if attached else ""
 
     if attached:
-        name = attachment_name(marker)
         result = eval_js(
             window_index, tab_index,
             "CGPT.attach(" + js_string(prompt) + ", " + js_string(name) + ")",
@@ -269,18 +269,48 @@ def send(window_index, tab_index, prompt):
         )
 
     # React enables the send button a tick after the input event lands, and an
-    # upload has to finish before it will accept the turn at all.
+    # upload has to settle before the turn can carry it.
+    #
+    # When a file is involved the gate is a positive one - the chip bearing its
+    # name is still on screen and the button is free. Waiting for the button
+    # alone was not enough: it unblocks both when the upload finished and when
+    # ChatGPT quietly removed the attachment, and gating on that sent turns
+    # with no file in them. Timing out here is the correct outcome; sending
+    # anyway is not, so this fails closed.
+    ready_call = "CGPT.attachmentReady(" + js_string(name if attached else "") + ")"
     deadline = time.time() + (ATTACH_WAIT if attached else 4.0)
-    result = {}
+    result, reason = {}, "never became ready"
     while time.time() < deadline:
         time.sleep(0.4)
-        if attached and not eval_js(
-            window_index, tab_index, "CGPT.attachmentReady()"
-        ).get("ready"):
-            continue
+        if attached:
+            ready = eval_js(window_index, tab_index, ready_call)
+            if not ready.get("ready"):
+                reason = str(ready.get("reason") or reason)
+                continue
         result = eval_js(window_index, tab_index, "CGPT.submit()")
-        if result.get("ok"):
+        if not result.get("ok"):
+            continue
+        if not attached:
             return marker
+        # The file should have travelled with the turn. Asking the message
+        # rather than the model keeps this independent of ChatGPT's wording.
+        time.sleep(1.5)
+        carried = eval_js(window_index, tab_index, "CGPT.sentWithAttachment(" + js_string(name) + ")")
+        if carried.get("carried"):
+            return marker
+        raise CliError(
+            "The turn was sent but arrived without " + name + ". Nothing was read "
+            "from it, so any answer to it would be about nothing. Re-run; if it "
+            "repeats, the conversation may be refusing uploads - try --new."
+        )
+
+    if attached:
+        raise CliError(
+            "Gave up waiting for " + name + " to be ready to send (" + reason + ").\n"
+            "Nothing was sent. ChatGPT accepted the file and then dropped it, or "
+            "the attachment chip moved; either way sending would have delivered an "
+            "empty reference."
+        )
     raise CliError("Could not press Send (" + str(result.get("error")) + ").")
 
 

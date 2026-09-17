@@ -6,12 +6,12 @@ compatibility: Requires macOS, Microsoft Edge signed in to ChatGPT, and Python 3
 
 # ChatGPT Agent Doctor
 
-Run the repository's doctor command:
+Run the repository's prerequisite checker:
 
 ```bash
-python3 ./chatgpt-agent.py --preset doctor
+python3 ./scripts/doctor.py
 ```
 
 Use this first when another ChatGPT Agent skill reports that the bridge cannot connect or invoke ChatGPT.
 
-Report the concrete unmet requirement instead of guessing.
+Report the concrete unmet requirement instead of guessing or attempting to grant permissions automatically.

@@ -15,17 +15,22 @@ capabilities are chatgpt_ops, which has no write and no shell.
 """
 
 import argparse
+import atexit
 import calendar
+import contextlib
+import fcntl
 import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import chatgpt_claims as claims
 import chatgpt_ops as ops
 import chatgpt_protocol as proto
 
@@ -36,6 +41,7 @@ _spec.loader.exec_module(cgpt)
 PRESET_DIR = os.path.join(HERE, "presets")
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".chatgpt-agent")
 SESSIONS = os.path.join(STATE_DIR, "sessions.json")
+SESSIONS_LOCK = os.path.join(STATE_DIR, "sessions.lock")
 RUNS_DIR = os.path.join(STATE_DIR, "runs")
 NEW_CHAT_URL = "https://chatgpt.com/"
 DEFAULT_RUN = "_last"
@@ -272,6 +278,8 @@ def load_sessions():
         elif isinstance(entry, dict) and isinstance(entry.get("url"), str):
             sessions[name] = {"url": entry["url"],
                               "updated": entry.get("updated") or fallback}
+            if isinstance(entry.get("tab_id"), int):
+                sessions[name]["tab_id"] = entry["tab_id"]
     return sessions
 
 
@@ -281,29 +289,81 @@ def session_url(name):
 
 
 def write_sessions(sessions):
+    """Replace the store in one step, so a reader never sees half a file.
+
+    Truncating the real path and writing into it leaves a window in which the
+    store holds nothing, or holds a prefix that will not parse. With runs in
+    parallel that window is reachable: another run reads the store on its way
+    to recording its own binding.
+    """
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        with open(SESSIONS, "w") as handle:
-            json.dump(sessions, handle, indent=2)
+        handle, temporary = tempfile.mkstemp(dir=STATE_DIR, prefix="sessions-",
+                                             suffix=".tmp")
+        try:
+            with os.fdopen(handle, "w") as opened:
+                json.dump(sessions, opened, indent=2)
+            os.replace(temporary, SESSIONS)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
     except OSError:
         pass  # a lost bookmark is not worth failing a finished review over
 
 
-def save_session(name, url):
-    sessions = load_sessions()
-    sessions[name] = {"url": url, "updated": _now_stamp()}
-    write_sessions(sessions)
+@contextlib.contextmanager
+def _sessions_locked():
+    """Serialise read-modify-write on the store shared by every run.
+
+    Each run records its binding when it ends. Two that read the store, add
+    their own entry and write it back can each write a version that never saw
+    the other, and the later write wins the whole file. The result is not a
+    corrupt store - it is a silently shorter one, which is harder to notice.
+    """
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        guard = open(SESSIONS_LOCK, "a+")
+    except OSError:
+        yield  # no lock available; a lost bookmark must not fail a real run
+        return
+    try:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
+        finally:
+            guard.close()
+
+
+def mutate_sessions(change):
+    """Apply `change` to the store while holding it exclusively."""
+    with _sessions_locked():
+        sessions = load_sessions()
+        change(sessions)
+        write_sessions(sessions)
+
+
+def save_session(name, url, tab_id=None):
+    def change(sessions):
+        entry = {"url": url, "updated": _now_stamp()}
+        if tab_id is not None:
+            entry["tab_id"] = int(tab_id)
+        sessions[name] = entry
+    mutate_sessions(change)
 
 
 def touch_session(name):
     """A session being reused is in use, whatever its age says. Without this a
     conversation returned to every week would still be pruned as stale."""
-    sessions = load_sessions()
-    entry = sessions.get(name)
-    if not entry:
-        return
-    entry["updated"] = _now_stamp()
-    write_sessions(sessions)
+    def change(sessions):
+        entry = sessions.get(name)
+        if entry:
+            entry["updated"] = _now_stamp()
+    mutate_sessions(change)
 
 
 # --- run state -------------------------------------------------------------
@@ -394,10 +454,10 @@ def prune_apply(victims):
         if kind == "run":
             clear_run(name)
     if names:
-        sessions = load_sessions()
-        for name in names:
-            sessions.pop(name, None)
-        write_sessions(sessions)
+        def change(sessions):
+            for name in names:
+                sessions.pop(name, None)
+        mutate_sessions(change)
     return victims
 
 
@@ -487,16 +547,88 @@ def workspace_facts(root):
 # --- browser ---------------------------------------------------------------
 
 
-def goto(window, tab, url, timeout):
+def _same_conversation(left, right):
+    """True when two URLs name the same ChatGPT conversation."""
+    left_id = claims.conversation_id(left)
+    right_id = claims.conversation_id(right)
+    if left_id and right_id:
+        return left_id == right_id
+    return left == right
+
+
+def track_conversation(tab_id, progress, held, args, log):
+    """Follow the conversation id, which is not settled when it first appears.
+
+    Measured 2026-09-17: a new chat's URL first carries a client-side
+    placeholder - /c/WEB:849fd09c-... - and the server-assigned id replaces it
+    moments later. Recording the first thing seen bound the session to a URL
+    that never resolves again, and put the conversation claim on an id no other
+    run could ever collide with, so the claim protected nothing.
+
+    Nothing here recognises the placeholder's shape. Following the id whenever
+    it changes covers this form and whatever the next one turns out to be.
+    """
+    try:
+        url = cgpt.eval_js(tab_id, "location.href")
+    except cgpt.TabGone:
+        if progress.get("url"):
+            raise
+        raise cgpt.CliError(
+            "The tab disappeared after the round was sent but before its "
+            "conversation URL could be recorded. Re-sending could duplicate "
+            "the round, so recovery stops here."
+        )
+    if not isinstance(url, str) or "/c/" not in url:
+        return
+    if _same_conversation(url, progress.get("url")):
+        return
+    progress["url"] = url
+    held.claim_conversation(claims.conversation_id(url))
+    log("conversation: " + url)
+    if args.session:
+        save_session(args.session, url, tab_id)
+
+
+def resolve_session_tab(entry, timeout):
+    """Return a binding only if its tab still shows this exact conversation.
+
+    A surviving tab id is insufficient: the user can drive that tab to another
+    conversation while every host/existence check still passes. Unknown or stale
+    bindings are reopened from the durable conversation URL instead.
+    """
+    url = entry["url"]
+    bound = entry.get("tab_id")
+    if isinstance(bound, int):
+        for _window, _index, tab_id, current_url in cgpt.parse_tabs(cgpt.bridge("list")):
+            if tab_id == bound and _same_conversation(current_url, url):
+                return bound
+    return cgpt.open_tab(url, timeout)
+
+
+def _rebind_after_tab_gone(tab_id, url, held, args, log):
+    """Reopen one vanished tab while retaining the conversation claim."""
+    replacement = cgpt.open_tab(url, args.timeout)
+    held.release_tab(tab_id)
+    held.claim_tab(replacement)
+    goto(replacement, url, args.timeout)
+    if args.focus:
+        cgpt.bridge("focus", replacement)
+    if args.session:
+        save_session(args.session, url, replacement)
+    log("  tab disappeared - reopened conversation as tab " + str(replacement))
+    return replacement
+
+
+def goto(tab_id, url, timeout):
     """Point the tab at `url` and wait until the composer is usable again."""
-    cgpt.bridge("eval", "location.href=" + json.dumps(url) + ";''", window, tab)
+    cgpt.bridge("eval", "location.href=" + json.dumps(url) + ";''", tab_id)
     deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(0.6)
-        if cgpt.bridge("loading", window, tab) != "done":
+        if cgpt.bridge("loading", tab_id) != "done":
             continue
         try:
-            if cgpt.eval_js(window, tab, "CGPT.probe()").get("ok"):
+            if cgpt.eval_js(tab_id, "CGPT.probe()").get("ok"):
                 return
         except cgpt.CliError:
             continue
@@ -514,6 +646,10 @@ def attempt(label, tries, log, action):
     for number in range(1, tries + 1):
         try:
             return action()
+        except cgpt.TabGone:
+            # Retrying the same stable id cannot revive a closed tab. More
+            # importantly, retrying send here could duplicate an accepted turn.
+            raise
         except cgpt.CliError as exc:
             if number >= tries:
                 raise
@@ -521,18 +657,58 @@ def attempt(label, tries, log, action):
             time.sleep(RETRY_PAUSE)
 
 
-def recover_reply(window, tab, marker, poll, log):
+def recover_reply(tab_id, marker, poll, log):
     """The reply to `marker` if that message already has one, else None."""
     if not marker:
         return None
     log("  checking whether the interrupted message already has a reply")
     try:
-        reply = cgpt.wait_for_reply(window, tab, marker, RECOVER_TIMEOUT, poll)
+        reply = cgpt.wait_for_reply(tab_id, marker, RECOVER_TIMEOUT, poll)
         log("  found it - continuing without re-sending")
         return reply
+    except cgpt.TabGone:
+        raise
     except cgpt.CliError:
         log("  none found - re-sending that message")
         return None
+
+
+def wait_with_tab_recovery(tab_id, marker, url, held, args, recovery, log,
+                           first_timeout=None, missing_ok=False):
+    """Wait for one accepted marker, reopening its conversation at most once."""
+    timeout = args.timeout if first_timeout is None else first_timeout
+    try:
+        reply = attempt("wait", args.retries, log,
+                        lambda: cgpt.wait_for_reply(tab_id, marker, timeout, args.poll))
+        return reply, tab_id
+    except cgpt.TabGone:
+        if recovery.get("used"):
+            raise cgpt.CliError(
+                "The ChatGPT tab disappeared a second time during this run. "
+                "The conversation is " + str(url or "unknown")
+            )
+        if not url:
+            raise cgpt.CliError(
+                "The ChatGPT tab disappeared after a round was sent, and its "
+                "conversation URL is unknown. Recovery cannot safely re-send it."
+            )
+        tab_id = _rebind_after_tab_gone(tab_id, url, held, args, log)
+        recovery["used"] = True
+        try:
+            reply = attempt("recover wait", args.retries, log,
+                            lambda: cgpt.wait_for_reply(
+                                tab_id, marker, args.timeout, args.poll))
+        except cgpt.TabGone:
+            raise cgpt.CliError(
+                "The ChatGPT tab disappeared a second time during this run. "
+                "The conversation is " + url
+            )
+        return reply, tab_id
+    except cgpt.CliError:
+        if missing_ok:
+            log("  none found - re-sending that message")
+            return None, tab_id
+        raise
 
 
 # --- the loop --------------------------------------------------------------
@@ -605,9 +781,9 @@ def run(args, log, progress):
         log("pruned " + describe_prune(dropped) + " older than "
             + str(STATE_TTL_DAYS) + " days")
 
-    window, tab = cgpt.ensure_tab(args.timeout)
-    if args.focus:
-        cgpt.bridge("focus", window, tab)
+    held = claims.ClaimSet(name)
+    atexit.register(held.close)
+    recovery = {"used": False}
 
     if args.resume:
         state = load_run(name)
@@ -623,12 +799,33 @@ def run(args, log, progress):
         budget.spent = int(state.get("spent") or 0)
         progress["url"] = state.get("url")
         log("resuming " + repr(name) + " at round " + str(first_round))
-        goto(window, tab, state["url"], args.timeout)
-        reply = recover_reply(window, tab, state.get("marker"), args.poll, log)
+        held.claim_conversation(claims.conversation_id(state["url"]))
+        entry = load_sessions().get(args.session) if args.session else None
+        if not entry or not _same_conversation(entry.get("url"), state["url"]):
+            entry = {"url": state["url"]}
+        tab_id = resolve_session_tab(entry, args.timeout)
+        held.claim_tab(tab_id)
+        if args.focus:
+            cgpt.bridge("focus", tab_id)
+        goto(tab_id, state["url"], args.timeout)
+        if args.session:
+            save_session(args.session, state["url"], tab_id)
+        marker = state.get("marker")
+        if marker:
+            log("  checking whether the interrupted message already has a reply")
+            reply, tab_id = wait_with_tab_recovery(
+                tab_id, marker, state["url"], held, args, recovery, log,
+                first_timeout=RECOVER_TIMEOUT, missing_ok=True)
+            if reply is not None:
+                log("  found it - continuing without re-sending")
+        else:
+            reply = None
     else:
         root = workspace_root(args.workspace)
         preset = load_preset(args.preset)
-        saved = session_url(args.session) if (args.session and not args.new) else None
+        saved_entry = (load_sessions().get(args.session)
+                       if (args.session and not args.new) else None)
+        saved = saved_entry.get("url") if saved_entry else None
         if saved:
             touch_session(args.session)
         facts = workspace_facts(root)
@@ -638,7 +835,25 @@ def run(args, log, progress):
         for fact in facts:
             log("  " + fact)
         log("conversation: " + (saved or "new chat"))
-        goto(window, tab, saved or NEW_CHAT_URL, args.timeout)
+
+        if saved:
+            progress["url"] = saved
+            held.claim_conversation(claims.conversation_id(saved))
+            tab_id = resolve_session_tab(saved_entry, args.timeout)
+            held.claim_tab(tab_id)
+            goto(tab_id, saved, args.timeout)
+            save_session(args.session, saved, tab_id)
+        elif args.session:
+            tab_id = cgpt.open_tab(NEW_CHAT_URL, args.timeout)
+            held.claim_tab(tab_id)
+            goto(tab_id, NEW_CHAT_URL, args.timeout)
+        else:
+            tab_id = cgpt.ensure_tab(args.timeout)
+            held.claim_tab(tab_id)
+            goto(tab_id, NEW_CHAT_URL, args.timeout)
+
+        if args.focus:
+            cgpt.bridge("focus", tab_id)
         message = opening_message(preset, root, args.task, args.allow_shell,
                                   write=args.write, facts=facts)
         first_round, reply = 1, None
@@ -655,23 +870,22 @@ def run(args, log, progress):
                 log("  " + str(message.count("\n") + 1) + " lines is too wide to "
                     "type - sending as an attachment, which stays in the conversation")
             marker = attempt("send", args.retries, log,
-                             lambda: cgpt.send(window, tab, message))
+                             lambda: cgpt.send(tab_id, message))
+
+            # A new chat gains its durable /c/<id> URL when the first turn lands.
+            # Capture it before waiting so a vanished tab can be reopened without
+            # guessing which conversation accepted the already-sent round.
+            track_conversation(tab_id, progress, held, args, log)
+
             # Checkpoint before waiting: this is the window a crash lands in.
             save_run(name, {
                 "url": progress.get("url"), "root": root, "round": round_number,
                 "spent": budget.spent, "pending_message": message, "marker": marker,
             })
-            reply = attempt("wait", args.retries, log,
-                            lambda: cgpt.wait_for_reply(
-                                window, tab, marker, args.timeout, args.poll))
+            reply, tab_id = wait_with_tab_recovery(
+                tab_id, marker, progress.get("url"), held, args, recovery, log)
 
-        if not progress.get("url"):
-            url = cgpt.eval_js(window, tab, "location.href")
-            if isinstance(url, str) and "/c/" in url:
-                progress["url"] = url
-                log("conversation: " + url)
-                if args.session:
-                    save_session(args.session, url)
+        track_conversation(tab_id, progress, held, args, log)
 
         try:
             requested = proto.extract_ops(reply)
@@ -691,6 +905,18 @@ def run(args, log, progress):
             # A reply with no block is the final answer - but only if it says
             # something. An empty one ends the run and gets saved as the result,
             # which is how a formatting stumble once produced a ten-byte report.
+            if proto.is_page_error(reply):
+                bad_format += 1
+                if bad_format >= MAX_BAD_FORMAT:
+                    raise cgpt.CliError(
+                        "ChatGPT's page reported a failure " + str(bad_format)
+                        + " times in a row instead of answering - giving up rather "
+                        "than reporting its error as the result. Last: " + reply.strip()
+                    )
+                log("  the page reported an error, not an answer - attempt "
+                    + str(bad_format) + "/" + str(MAX_BAD_FORMAT) + ", asking again")
+                message, reply = EMPTY_REPLY, None
+                continue
             if proto.is_blank_answer(reply):
                 bad_format += 1
                 if bad_format >= MAX_BAD_FORMAT:
@@ -745,9 +971,9 @@ def run(args, log, progress):
         # One last exchange, for committing only. Without it the work of the
         # whole run stays in the worktree and dies with the session.
         log("round budget spent - offering a landing round to commit")
-        marker = attempt("send", args.retries, log, lambda: cgpt.send(window, tab, LANDING_ROUND))
-        reply = attempt("wait", args.retries, log,
-                        lambda: cgpt.wait_for_reply(window, tab, marker, args.timeout, args.poll))
+        marker = attempt("send", args.retries, log, lambda: cgpt.send(tab_id, LANDING_ROUND))
+        reply, tab_id = wait_with_tab_recovery(
+            tab_id, marker, progress.get("url"), held, args, recovery, log)
         try:
             requested = proto.extract_ops(reply)
         except proto.ProtocolError:
@@ -763,16 +989,16 @@ def run(args, log, progress):
                 budget.charge(len(result.get("body") or ""))
                 results.append(result)
             marker = attempt("send", args.retries, log, lambda: cgpt.send(
-                window, tab, proto.format_results(results) + "\n\n" + LANDED))
-            reply = attempt("wait", args.retries, log,
-                            lambda: cgpt.wait_for_reply(window, tab, marker, args.timeout, args.poll))
+                tab_id, proto.format_results(results) + "\n\n" + LANDED))
+            reply, tab_id = wait_with_tab_recovery(
+                tab_id, marker, progress.get("url"), held, args, recovery, log)
         clear_run(name)
         return reply
 
     log("round budget spent - asking for a conclusion")
-    marker = attempt("send", args.retries, log, lambda: cgpt.send(window, tab, BUDGET_SPENT))
-    answer = attempt("wait", args.retries, log,
-                     lambda: cgpt.wait_for_reply(window, tab, marker, args.timeout, args.poll))
+    marker = attempt("send", args.retries, log, lambda: cgpt.send(tab_id, BUDGET_SPENT))
+    answer, tab_id = wait_with_tab_recovery(
+        tab_id, marker, progress.get("url"), held, args, recovery, log)
     clear_run(name)
     return answer
 
@@ -843,29 +1069,45 @@ def main(argv=None):
         return 0
 
     if args.forget:
-        sessions = load_sessions()
-        if sessions.pop(args.forget, None) is None:
+        dropped = []
+
+        def change(sessions):
+            dropped.append(sessions.pop(args.forget, None))
+
+        mutate_sessions(change)
+        if dropped[0] is None:
             sys.stderr.write("no session named " + repr(args.forget) + "\n")
             return 1
-        write_sessions(sessions)
         print("forgot " + args.forget)
         return 0
 
     if args.prune:
         victims = prune_plan(days=None if args.prune_all else args.days)
-        if not victims:
+        abandoned_claims = claims.list_unheld_claims()
+        if not victims and not abandoned_claims:
             print("nothing to prune")
             return 0
         for kind, name, age in victims:
             print(kind + "\t" + name + "\t" + _format_age(age))
+        for name in abandoned_claims:
+            print("claim\t" + name + "\tunheld")
         if not args.yes:
             print("")
-            print("listed only - repeat with --yes to remove "
-                  + describe_prune(victims))
+            summary = describe_prune(victims) if victims else ""
+            if abandoned_claims:
+                summary += (", " if summary else "") + str(len(abandoned_claims)) + " abandoned claim"
+                if len(abandoned_claims) != 1:
+                    summary += "s"
+            print("listed only - repeat with --yes to remove " + summary)
             return 0
         prune_apply(victims)
+        removed_claims = claims.prune_unheld_claims()
         print("")
-        print("removed " + describe_prune(victims))
+        if victims:
+            print("removed " + describe_prune(victims))
+        if removed_claims:
+            print("removed " + str(len(removed_claims)) + " abandoned claim"
+                  + ("" if len(removed_claims) == 1 else "s"))
         return 0
 
     # --write is implement mode: it needs the command op, and its own preset
@@ -890,9 +1132,21 @@ def main(argv=None):
             sys.stderr.write(line + "\n")
             sys.stderr.flush()
 
+    # A write run that commits nothing looks exactly like one that worked: same
+    # exit code, same shape of answer. Twice now a dispatch returned an
+    # explanation of why it had stopped and that read as a result. HEAD is the
+    # one fact that settles it, so it gets stated either way.
+    landing = workspace_root(args.workspace) if args.write else None
+    before = _first_line(["git", "rev-parse", "HEAD"], landing) if landing else None
+
     progress = {}
     try:
         answer = run(args, log, progress)
+    except claims.ClaimBusy as exc:
+        # Deliberately not a wait. Queueing behind a run that may last twenty
+        # minutes is worse than failing in a second with the holder named.
+        sys.stderr.write(str(exc) + "\n")
+        return 1
     except cgpt.CliError as exc:
         sys.stderr.write(str(exc) + "\n")
         if progress.get("url"):
@@ -905,6 +1159,14 @@ def main(argv=None):
     except KeyboardInterrupt:
         sys.stderr.write("interrupted\n")
         return 130
+
+    if landing:
+        after = _first_line(["git", "rev-parse", "HEAD"], landing)
+        if after and after == before:
+            log("note: this write run committed nothing - HEAD is still "
+                + before[:7] + ". Whatever it says below, the repository is unchanged.")
+        elif after:
+            log("committed: " + (before or "?")[:7] + " -> " + after[:7])
 
     if args.out:
         with open(args.out, "w") as handle:

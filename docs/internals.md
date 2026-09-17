@@ -71,12 +71,36 @@ Two traps worth remembering when you do:
 - **`aria-label` is localised** — on a Vietnamese UI the send button reads
   *"Gửi câu lệnh"*. Match `data-testid`, never visible text.
 
-### Sharing the tab
+### Parallel runs: stable ids and kernel ownership
 
-Concurrent use is handled for *reading* but not for *writing*: while ChatGPT is
-generating, the send button is replaced by a stop button, so a second run
-started mid-stream fails with *Could not press Send* rather than corrupting
-anything. Run invocations one at a time.
+Tab positions are discovery data, not identity. Opening, closing or dragging a
+tab can renumber every tab after it, so a `(window index, tab index)` captured
+by one process is already stale by the time another browser call uses it. Edge's
+integer tab `id` is stable across those reorderings, which is why `list` returns
+both the human-useful positions and the id, while every later bridge operation
+accepts the id.
+
+There is a second race hiding inside that rule. Resolving an id to a window/tab
+position in one `osascript` invocation and executing against that position in a
+second invocation would merely move the stale-index window between two process
+calls. Each bridge mode therefore receives the stable id, walks Edge's live tab
+objects, matches `id of tb`, and performs the requested operation **inside that
+same `osascript` invocation**. Reordering before or after that invocation is
+irrelevant; there is no saved positional address to decay.
+
+A stable tab is not enough for exclusivity because two tabs can show the same
+ChatGPT `/c/<id>` conversation. A run therefore claims both its tab and, once it
+is known, the conversation id for the whole run. Claims use non-blocking
+`flock(LOCK_EX | LOCK_NB)`: a contender either owns the resource immediately or
+fails immediately with metadata naming the holder. It never waits.
+
+The lock is deliberately kernel-held rather than inferred from a pid file. Pids
+can be reused, metadata can be corrupt, and a contender cannot safely decide
+that another process is dead from bookkeeping alone. An open file description
+held by the process gives the kernel that job instead: process exit, including
+`SIGKILL`, releases the lock automatically. The `.lock` file may remain on disk,
+but it has no authority once unlocked; `--prune` reports and can remove those
+abandoned files separately from stale sessions and dead checkpoints.
 
 Likewise, `<code>` elements carry **no** `language-*` class. The language is a
 header label beside the Run button, which is why `chatgpt_dom.js` recovers it
@@ -218,8 +242,10 @@ re-sending it. Runs are checkpointed under their `--session` name, or under
 A checkpoint is removed when its run ends, which means a run that never ends —
 killed, crashed, given up on — leaves one behind. Every run therefore prunes
 checkpoints and session bookmarks older than `STATE_TTL_DAYS` (14) before
-writing its own, and `--prune` exposes the same plan on demand: `prune_plan()`
-lists, `prune_apply()` deletes, and the CLI only calls the second one with
-`--yes`. Both hold back the name the current run is using, so housekeeping can
-never sweep the checkpoint a `--resume` is about to read.
+writing its own. `--prune` exposes the same plan on demand and, separately,
+asks the kernel which claim files are no longer locked. Its output labels those
+as `claim` rows rather than folding them into session/checkpoint age cleanup.
+`prune_plan()` lists age-based state, `prune_apply()` deletes it, and the CLI
+only mutates either category with `--yes`. The current run's name is held back,
+so housekeeping can never sweep the checkpoint a `--resume` is about to read.
 

@@ -21,9 +21,10 @@ Forwarding rules:
 - Treat `--out`, `--max-rounds`, `--timeout` and `--new` as controls: keep them
   on the command line and strip them from the task text you forward.
 - A run takes one to three minutes and prints its progress on stderr. That is
-  normal. Do not re-run it because it seems slow, and never start a second run
-  while one is going — the bridge drives a single browser tab and concurrent
-  runs collide.
+  normal. Do not re-run it because it seems slow. Separate bridge invocations
+  may run in parallel when they use different conversations; if this run needs
+  a conversation another process owns, it fails immediately and names that
+  holder rather than waiting.
 - Return the command's stdout exactly as-is, with no commentary before or after
   it. The caller needs ChatGPT's words, not your summary of them.
 - If the command fails, run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.py"`

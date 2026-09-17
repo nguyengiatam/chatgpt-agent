@@ -1,6 +1,6 @@
 ---
 name: chatgpt-agent-runtime
-description: Use when invoking or debugging the ChatGPT bridge from Claude Code — the flags that exist, the prerequisites that make it fail before it starts, the one-run-at-a-time rule, which tasks fit the bridge at all, and what --allow-shell does and does not bound.
+description: Use when invoking or debugging the ChatGPT bridge from Claude Code — the flags that exist, prerequisites, parallel-run ownership, which tasks fit the bridge at all, and what --allow-shell does and does not bound.
 ---
 
 # ChatGPT bridge runtime
@@ -37,7 +37,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/chatgpt-agent.py" --preset review [flags] "<task>
 | `--resume` | off | continue this session's interrupted run |
 | `--timeout` | `300` | seconds to wait for one reply |
 | `--list-sessions` / `--forget <name>` | | manage saved conversations |
-| `--prune` | off | list dead checkpoints and stale sessions, then exit |
+| `--prune` | off | list dead checkpoints, stale sessions and abandoned claim files, then exit |
 | `--days` / `--all` / `--yes` | `14` / off / off | with `--prune`: the age line, ignore age, actually delete |
 
 A run normally takes one to three minutes across three or four exchanges.
@@ -68,22 +68,33 @@ time. Run `scripts/doctor.py` to see which one is missing; it prints the fix
 under each failure. Two of them are permissions only the user can grant, and
 signing in is never automated.
 
-## One run at a time
+## Parallel runs and ownership
 
-There is no parallel mode, and adding one is not a matter of launching two
-processes. `ensure_tab` takes the **first** ChatGPT tab it finds and `goto`
-navigates that same tab, so a second run steers the first one's conversation
-out from under it. Supporting parallel runs would mean pinning each run to its
-own tab and claiming it, which the bridge does not do today.
+Runs may execute in parallel. A run claims its stable Edge tab id and the
+conversation shown in that tab, and keeps those claims for the whole run.
+Conversation ownership is exclusive even when the same conversation is open in
+two different tabs. A contender never waits: if the conversation it needs is
+owned, it fails immediately and names the holder.
 
-The bridge drives a single browser tab. While a reply is generating, the send
-button is a stop button, so a second run started mid-stream fails with *Could
-not press Send*. Never launch runs in parallel, and do not retry a run that
-looks slow — it is almost certainly still waiting on a reply.
+One-shot questions can route around a busy *tab*: when the first candidate is
+claimed they try another ChatGPT tab, or open one. They do not route around a
+busy *conversation*. Named sessions likewise keep their conversation identity
+and reopen/rebind it when the saved tab binding is stale.
 
-Each message carries a marker so the loop can find its own reply. That makes it
-safe for the user to keep using the tab, but it does not make concurrent runs
-safe.
+Claims are non-blocking kernel `flock` locks. Metadata in the claim file is only
+for the diagnostic; it does not decide whether a holder is alive. The kernel
+releases ownership when the process ends, including `kill -9`, so there is no
+manual unlock step. `--prune` reports leftover unlocked claim files separately
+from dead checkpoints and stale sessions.
+
+All runs still share one Edge instance. Several streaming tabs consume more
+machine resources than one and there is no enforced concurrency limit. A run
+also cannot outlive a machine sleep longer than `--timeout`; for long unattended
+runs, use `caffeinate -dimsu` around the invocation to keep macOS awake.
+
+Each message still carries a marker so the loop attributes a reply to the prompt
+it sent. Ownership prevents another run from sharing the conversation; the
+marker remains the second line of defence against manual activity in the tab.
 
 ## What it can and cannot do
 

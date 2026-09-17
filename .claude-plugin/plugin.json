@@ -1,8 +1,8 @@
 {
   "name": "chatgpt-agent",
   "displayName": "ChatGPT Agent",
-  "description": "Delegate review, planning and implementation to the ChatGPT web UI from Claude Code. ChatGPT reads the repo itself over a local bridge, so the diff never enters Claude's context and the reasoning is billed to web-chat quota. Read-only by default; --allow-shell runs commands; --write lets it edit, test and commit the workspace. macOS and Microsoft Edge only; one run at a time.",
-  "version": "0.5.0",
+  "description": "Delegate review, planning and implementation to the ChatGPT web UI from Claude Code. ChatGPT reads the repo itself over a local bridge, so the diff never enters Claude's context and the reasoning is billed to web-chat quota. Read-only by default; --allow-shell runs commands; --write lets it edit, test and commit the workspace. macOS and Microsoft Edge only; parallel runs are isolated per conversation.",
+  "version": "0.6.0",
   "author": {
     "name": "Nguyễn Gia Tâm"
   },

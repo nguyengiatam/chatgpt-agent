@@ -226,7 +226,9 @@ heavier on the machine than one, and the bridge enforces no concurrency limit.
 Also, a run cannot survive the machine sleeping longer than its `--timeout`:
 macOS can throttle a background tab hard enough that a reply freezes part-way.
 For long unattended runs, the mitigation in use is to wrap the invocation in
-`caffeinate -dimsu` so the machine stays awake for the run.
+`caffeinate -dimsu`. That keeps the display from sleeping, which is what
+usually triggers the lock - it cannot stop a lock you ask for by hand, and a
+run that outlives its `--timeout` while locked still dies.
 
 ## Troubleshooting
 

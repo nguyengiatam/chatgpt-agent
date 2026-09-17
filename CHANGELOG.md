@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.0
+
+**Runs can now happen in parallel, one per conversation.** A review, a plan and
+an implementation no longer have to take turns just because they share one
+Edge. Each run owns the conversation it is using for its whole lifetime; if
+another process asks for that same conversation it fails immediately and names
+the holder instead of waiting behind a run that may last twenty minutes.
+
+The binding no longer depends on where a tab happens to sit in a window. Edge's
+stable tab id follows the tab through opens, closes and reordering, while the
+conversation claim prevents two different tabs showing the same `/c/<id>` from
+being treated as independent work. One-shot questions can skip a claimed tab
+and use another, but an already-owned conversation is still refused.
+
+**Ownership dies with the process.** Claims are kernel-held locks, so Ctrl-C,
+a crash or even `kill -9` releases the conversation without a stale-pid guess or
+a cleanup ritual. The small claim files can outlive their locks; `--prune` now
+reports those abandoned files separately from stale sessions and dead
+checkpoints.
+
+Parallel runs still share one browser: several streaming tabs are heavier than
+one, and there is no concurrency limit. Long unattended runs also need the
+machine awake — sleeping longer than `--timeout` can throttle a tab until its
+reply freezes — so `caffeinate -dimsu` is the practical wrapper for those runs.
+
+
 ## 0.5.0
 
 **Both state stores now have a floor.** `~/.chatgpt-agent` was append-only in
@@ -177,7 +203,7 @@ than "all read-only".
 
 **Docs: the README was 511 lines and claimed read-only in three places.**
 Restructured to 214 — what it is, the three things it does, install, setup, the
-honest capability section, flags, and the one-run-at-a-time rule. The bridge
+honest capability section, flags, and the former serial-run guidance. The bridge
 internals, the `c2c` protocol, the Edge traps and the testing notes moved to
 `docs/internals.md`. The plugin and marketplace descriptions, the reviewer
 agent's "nothing you forward can modify the repository", and the runtime skill's

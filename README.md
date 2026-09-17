@@ -181,32 +181,52 @@ refused by the runtime.
 | `--timeout` | `300` | seconds per reply |
 | `--list-sessions` | | print saved conversations with their age |
 | `--forget <name>` | | drop one saved conversation |
-| `--prune` | off | list dead checkpoints and stale sessions, then exit |
+| `--prune` | off | list dead checkpoints, stale sessions and abandoned claim files, then exit |
 | `--days` | `14` | age `--prune` calls stale |
 | `--all` | off | with `--prune`: everything, whatever its age |
 | `--yes` | off | with `--prune`: delete instead of listing |
 
 ## State on disk
 
-Two stores live under `~/.chatgpt-agent`:
+Three kinds of state live under `~/.chatgpt-agent`:
 
-- `sessions.json` — one record per session name, `{"url": …, "updated": …}`.
-  Without `--session`, every run starts a fresh chat and nothing is remembered.
+- `sessions.json` — one record per session name, including the conversation URL
+  and, when known, the stable Edge tab id that currently shows it.
 - `runs/<name>.json` — a checkpoint written before every wait, so a run killed
   mid-flight can be picked up with `--resume` instead of thrown away.
+- `claims/*.lock` — bookkeeping beside kernel-held ownership locks. The file may
+  remain after its owner exits; the lock does not.
 
-Neither used to be cleaned up: `clear_run()` only fires when a run ends
-cleanly, so every interrupted run left a checkpoint behind for good, and
-bookmarks were never dropped at all. Each run now prunes whatever is older than
-14 days before it writes its own state, and `--prune` does it on demand —
-listing by default, deleting only with `--yes`. Whatever the current run needs
-is held back, so a `--resume` is never the thing swept.
+Each run prunes old checkpoints and session bookmarks before writing its own
+state. `--prune` exposes the same cleanup on demand and also reports abandoned
+claim files as their own `claim` rows. It lists by default and deletes only with
+`--yes`; state the current run needs is held back so housekeeping cannot sweep a
+checkpoint it is about to resume.
 
-## One run at a time
+## Parallel runs
 
-The bridge steers a single browser tab. A second run started while the first is
-generating can steer that conversation out from under it and fail. There is no
-parallel mode.
+Runs may execute in parallel. Each run owns its tab **and the conversation that
+tab shows** for the whole run. Conversation ownership is the important part:
+two tabs showing the same conversation still conflict. If a requested
+conversation is already owned, the contender fails immediately and names the
+holder; it never waits in a queue.
+
+A one-shot question is less strict about the tab itself. If its first candidate
+tab is claimed, it quietly tries another ChatGPT tab or opens one. If the
+conversation shown by a candidate is already claimed, that conflict is refused
+rather than routed around.
+
+Ownership is a kernel-held file lock, not a pid file. When the owning process
+ends — cleanly, by Ctrl-C, or even by `kill -9` — the kernel releases the lock,
+so there is no stranded conversation and no ownership cleanup step to remember.
+Abandoned claim *files* are only bookkeeping and are what `--prune` reports.
+
+Parallelism still shares one Edge instance. Several tabs streaming at once are
+heavier on the machine than one, and the bridge enforces no concurrency limit.
+Also, a run cannot survive the machine sleeping longer than its `--timeout`:
+macOS can throttle a background tab hard enough that a reply freezes part-way.
+For long unattended runs, the mitigation in use is to wrap the invocation in
+`caffeinate -dimsu` so the machine stays awake for the run.
 
 ## Troubleshooting
 

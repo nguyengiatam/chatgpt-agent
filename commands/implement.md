@@ -27,4 +27,6 @@ history rewrites are refused, so the result stays local for you to review. The
 tests it runs are the repository's own — a green suite is evidence about the
 suite, not about the change. Read the diff before you keep it.
 
-One run at a time: the bridge drives a single browser tab.
+Independent runs may execute in parallel when they use different
+conversations. If the conversation this run needs is already owned, the command
+fails immediately and names the holder rather than waiting behind it.

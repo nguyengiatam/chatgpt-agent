@@ -5,9 +5,10 @@
 --
 --   osascript chatgpt_bridge.applescript list
 --   osascript chatgpt_bridge.applescript open <url>
---   osascript chatgpt_bridge.applescript loading <window> <tab>
---   osascript chatgpt_bridge.applescript focus <window> <tab>
---   osascript chatgpt_bridge.applescript eval <javascript> <window> <tab>
+--   osascript chatgpt_bridge.applescript loading <tabid>
+--   osascript chatgpt_bridge.applescript focus <tabid>
+--   osascript chatgpt_bridge.applescript eval <javascript> <tabid>
+--   osascript chatgpt_bridge.applescript close <tabid>
 
 on run argv
 	-- NB: `mode` is a term in Edge's scripting dictionary, so a variable of
@@ -27,35 +28,67 @@ on run argv
 				set t to 0
 				repeat with tb in tabs of win
 					set t to t + 1
-					set out to out & (w as text) & sep & (t as text) & sep & (URL of tb) & eol
+					set out to out & (w as text) & sep & (t as text) & sep & ((id of tb) as text) & sep & (URL of tb) & eol
 				end repeat
 			end repeat
 			return out
 
 		else if theMode is "open" then
 			if (count of windows) is 0 then make new window
-			make new tab at end of tabs of window 1 with properties {URL:(item 2 of argv)}
-			return "ok"
+			set tb to make new tab at end of tabs of window 1 with properties {URL:(item 2 of argv)}
+			return (id of tb) as text
 
 		else if theMode is "loading" then
-			set w to (item 2 of argv) as integer
-			set t to (item 3 of argv) as integer
-			if loading of tab t of window w then
-				return "loading"
-			else
-				return "done"
-			end if
+			set theId to (item 2 of argv) as integer
+			repeat with win in windows
+				repeat with tb in tabs of win
+					if ((id of tb) as integer) is theId then
+						if loading of tb then
+							return "loading"
+						else
+							return "done"
+						end if
+					end if
+				end repeat
+			end repeat
+			error "tab not found: " & (theId as text)
 
 		else if theMode is "focus" then
-			set w to (item 2 of argv) as integer
-			set t to (item 3 of argv) as integer
-			set active tab index of window w to t
-			return "ok"
+			set theId to (item 2 of argv) as integer
+			repeat with win in windows
+				set t to 0
+				repeat with tb in tabs of win
+					set t to t + 1
+					if ((id of tb) as integer) is theId then
+						set active tab index of win to t
+						return "ok"
+					end if
+				end repeat
+			end repeat
+			error "tab not found: " & (theId as text)
 
 		else if theMode is "eval" then
-			set w to (item 3 of argv) as integer
-			set t to (item 4 of argv) as integer
-			return (execute tab t of window w javascript (item 2 of argv))
+			set theId to (item 3 of argv) as integer
+			repeat with win in windows
+				repeat with tb in tabs of win
+					if ((id of tb) as integer) is theId then
+						return (execute tb javascript (item 2 of argv))
+					end if
+				end repeat
+			end repeat
+			error "tab not found: " & (theId as text)
+
+		else if theMode is "close" then
+			set theId to (item 2 of argv) as integer
+			repeat with win in windows
+				repeat with tb in tabs of win
+					if ((id of tb) as integer) is theId then
+						close tb
+						return "ok"
+					end if
+				end repeat
+			end repeat
+			error "tab not found: " & (theId as text)
 		end if
 	end tell
 

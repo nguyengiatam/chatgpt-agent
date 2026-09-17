@@ -49,6 +49,10 @@ class CliError(Exception):
     """A failure with an explanation the user can act on."""
 
 
+class TabGone(CliError):
+    """The stable Edge tab id no longer names any open tab."""
+
+
 # --- pure helpers (unit-tested in test_chatgpt_cli.py) ----------------------
 
 
@@ -62,36 +66,37 @@ def js_string(text):
 
 
 def parse_tabs(raw):
-    """Parse the `window<TAB>tab<TAB>url` rows printed by the bridge."""
+    """Parse the `window<TAB>tab<TAB>id<TAB>url` rows printed by the bridge."""
     tabs = []
     for line in raw.splitlines():
         if not line.strip():
             continue
-        parts = line.split("\t", 2)
-        if len(parts) != 3:
+        parts = line.split("\t", 3)
+        if len(parts) != 4:
             continue
         try:
             window_index = int(parts[0])
             tab_index = int(parts[1])
+            tab_id = int(parts[2])
         except ValueError:
             continue
-        tabs.append((window_index, tab_index, parts[2]))
+        tabs.append((window_index, tab_index, tab_id, parts[3]))
     return tabs
 
 
 def find_chatgpt_tab(tabs):
-    """First (window, tab) whose *host* is ChatGPT, or None.
+    """First stable tab id whose *host* is ChatGPT, or None.
 
     Matching on host rather than on a substring keeps an unrelated page that
     merely mentions chatgpt.com in its query string from being hijacked.
     """
-    for window_index, tab_index, url in tabs:
+    for _window_index, _tab_index, tab_id, url in tabs:
         try:
             host = urlsplit(url).hostname
         except ValueError:
             continue
         if host and host.lower() in CHATGPT_HOSTS:
-            return (window_index, tab_index)
+            return tab_id
     return None
 
 
@@ -150,6 +155,8 @@ def bridge(*args):
         text=True,
     )
     if proc.returncode != 0:
+        if "tab not found" in proc.stderr.lower():
+            raise TabGone(_explain(proc.stderr))
         raise CliError(_explain(proc.stderr))
     return proc.stdout.strip()
 
@@ -164,10 +171,10 @@ def dom_source():
     return _dom_cache[0]
 
 
-def eval_js(window_index, tab_index, expression):
+def eval_js(tab_id, expression):
     """Run `expression` in the tab and return its value, decoded from JSON."""
     script = dom_source() + "\n;JSON.stringify(" + expression + ");"
-    raw = bridge("eval", script, window_index, tab_index)
+    raw = bridge("eval", script, tab_id)
     if not raw:
         raise CliError(ENABLE_HINT)
     try:
@@ -182,18 +189,13 @@ def ensure_tab(timeout):
     if found:
         return found
 
-    bridge("open", CHATGPT_URL)
+    tab_id = int(bridge("open", CHATGPT_URL))
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if bridge("loading", tab_id) == "done":
+            return tab_id
         time.sleep(0.5)
-        found = find_chatgpt_tab(parse_tabs(bridge("list")))
-        if not found:
-            continue
-        while time.time() < deadline:
-            if bridge("loading", found[0], found[1]) == "done":
-                return found
-            time.sleep(0.5)
-        return found
+    return tab_id
     raise CliError("Opened " + CHATGPT_URL + " but it did not finish loading in time.")
 
 
@@ -258,7 +260,7 @@ def _notify(line):
     sys.stderr.flush()
 
 
-def attach_payload(window_index, tab_index, payload, name, tries=ATTACH_TRIES):
+def attach_payload(tab_id, payload, name, tries=ATTACH_TRIES):
     """Upload `payload` as `name`, returning once its chip is on screen.
 
     The first attach on a freshly navigated chat is the one that fails: React
@@ -277,7 +279,7 @@ def attach_payload(window_index, tab_index, payload, name, tries=ATTACH_TRIES):
             _notify("  the page had not bound its upload handler yet - "
                     "re-attaching " + name + " (try " + str(attempt) + " of " + str(tries) + ")")
         result = eval_js(
-            window_index, tab_index,
+            tab_id,
             "CGPT.attach(" + js_string(payload) + ", " + js_string(name) + ")",
         )
         if not result.get("ok"):
@@ -287,7 +289,7 @@ def attach_payload(window_index, tab_index, payload, name, tries=ATTACH_TRIES):
         deadline = time.time() + ATTACH_SETTLE
         while time.time() < deadline:
             time.sleep(0.4)
-            if eval_js(window_index, tab_index, "CGPT.hasChip(" + js_string(name) + ")"):
+            if eval_js(tab_id, "CGPT.hasChip(" + js_string(name) + ")"):
                 return
     raise CliError(
         name + " never appeared in the composer after " + str(tries) + " attempts.\n"
@@ -296,7 +298,7 @@ def attach_payload(window_index, tab_index, payload, name, tries=ATTACH_TRIES):
     )
 
 
-def send(window_index, tab_index, prompt):
+def send(tab_id, prompt):
     """Type and submit `prompt`, returning the marker that identifies it.
 
     A payload too wide to type is uploaded instead; the marker is always typed,
@@ -307,12 +309,12 @@ def send(window_index, tab_index, prompt):
     name = attachment_name(marker) if attached else ""
 
     if attached:
-        attach_payload(window_index, tab_index, prompt, name)
+        attach_payload(tab_id, prompt, name)
         typed = marker + "\n\n" + ATTACHED_NOTE
     else:
         typed = marker + "\n\n" + prompt
 
-    result = eval_js(window_index, tab_index, "CGPT.insert(" + js_string(typed) + ")")
+    result = eval_js(tab_id, "CGPT.insert(" + js_string(typed) + ")")
     if not result.get("ok"):
         raise CliError(
             "Could not type into the ChatGPT composer (" + str(result.get("error")) + ").\n"
@@ -335,11 +337,11 @@ def send(window_index, tab_index, prompt):
     while time.time() < deadline:
         time.sleep(0.4)
         if attached:
-            ready = eval_js(window_index, tab_index, ready_call)
+            ready = eval_js(tab_id, ready_call)
             if not ready.get("ready"):
                 reason = str(ready.get("reason") or reason)
                 continue
-        result = eval_js(window_index, tab_index, "CGPT.submit()")
+        result = eval_js(tab_id, "CGPT.submit()")
         if not result.get("ok"):
             continue
         if not attached:
@@ -347,7 +349,7 @@ def send(window_index, tab_index, prompt):
         # The file should have travelled with the turn. Asking the message
         # rather than the model keeps this independent of ChatGPT's wording.
         time.sleep(1.5)
-        carried = eval_js(window_index, tab_index, "CGPT.sentWithAttachment(" + js_string(name) + ")")
+        carried = eval_js(tab_id, "CGPT.sentWithAttachment(" + js_string(name) + ")")
         if carried.get("carried"):
             return marker
         raise CliError(
@@ -366,14 +368,14 @@ def send(window_index, tab_index, prompt):
     raise CliError("Could not press Send (" + str(result.get("error")) + ").")
 
 
-def wait_for_reply(window_index, tab_index, marker, timeout, poll):
+def wait_for_reply(tab_id, marker, timeout, poll):
     tracker = StabilityTracker()
     call = "CGPT.state(" + js_string(marker) + ")"
     deadline = time.time() + timeout
     latest = {}
     while time.time() < deadline:
         time.sleep(poll)
-        latest = eval_js(window_index, tab_index, call)
+        latest = eval_js(tab_id, call)
         if tracker.update(
             latest.get("found", False),
             latest.get("streaming", False),
@@ -432,19 +434,19 @@ def main(argv=None):
         parser.error("no prompt given")
 
     try:
-        window_index, tab_index = ensure_tab(args.timeout)
+        tab_id = ensure_tab(args.timeout)
         if args.focus:
-            bridge("focus", window_index, tab_index)
+            bridge("focus", tab_id)
 
-        status = eval_js(window_index, tab_index, "CGPT.probe()")
+        status = eval_js(tab_id, "CGPT.probe()")
         if not status.get("ok"):
             raise CliError(
                 "The ChatGPT tab has no composer (" + str(status.get("error")) + ").\n"
                 "URL is " + str(status.get("url")) + " - sign in there first."
             )
 
-        marker = send(window_index, tab_index, prompt)
-        reply = wait_for_reply(window_index, tab_index, marker, args.timeout, args.poll)
+        marker = send(tab_id, prompt)
+        reply = wait_for_reply(tab_id, marker, args.timeout, args.poll)
     except CliError as exc:
         sys.stderr.write(str(exc) + "\n")
         return 1

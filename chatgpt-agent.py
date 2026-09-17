@@ -487,16 +487,16 @@ def workspace_facts(root):
 # --- browser ---------------------------------------------------------------
 
 
-def goto(window, tab, url, timeout):
+def goto(tab_id, url, timeout):
     """Point the tab at `url` and wait until the composer is usable again."""
-    cgpt.bridge("eval", "location.href=" + json.dumps(url) + ";''", window, tab)
+    cgpt.bridge("eval", "location.href=" + json.dumps(url) + ";''", tab_id)
     deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(0.6)
-        if cgpt.bridge("loading", window, tab) != "done":
+        if cgpt.bridge("loading", tab_id) != "done":
             continue
         try:
-            if cgpt.eval_js(window, tab, "CGPT.probe()").get("ok"):
+            if cgpt.eval_js(tab_id, "CGPT.probe()").get("ok"):
                 return
         except cgpt.CliError:
             continue
@@ -521,13 +521,13 @@ def attempt(label, tries, log, action):
             time.sleep(RETRY_PAUSE)
 
 
-def recover_reply(window, tab, marker, poll, log):
+def recover_reply(tab_id, marker, poll, log):
     """The reply to `marker` if that message already has one, else None."""
     if not marker:
         return None
     log("  checking whether the interrupted message already has a reply")
     try:
-        reply = cgpt.wait_for_reply(window, tab, marker, RECOVER_TIMEOUT, poll)
+        reply = cgpt.wait_for_reply(tab_id, marker, RECOVER_TIMEOUT, poll)
         log("  found it - continuing without re-sending")
         return reply
     except cgpt.CliError:
@@ -605,9 +605,9 @@ def run(args, log, progress):
         log("pruned " + describe_prune(dropped) + " older than "
             + str(STATE_TTL_DAYS) + " days")
 
-    window, tab = cgpt.ensure_tab(args.timeout)
+    tab_id = cgpt.ensure_tab(args.timeout)
     if args.focus:
-        cgpt.bridge("focus", window, tab)
+        cgpt.bridge("focus", tab_id)
 
     if args.resume:
         state = load_run(name)
@@ -623,8 +623,8 @@ def run(args, log, progress):
         budget.spent = int(state.get("spent") or 0)
         progress["url"] = state.get("url")
         log("resuming " + repr(name) + " at round " + str(first_round))
-        goto(window, tab, state["url"], args.timeout)
-        reply = recover_reply(window, tab, state.get("marker"), args.poll, log)
+        goto(tab_id, state["url"], args.timeout)
+        reply = recover_reply(tab_id, state.get("marker"), args.poll, log)
     else:
         root = workspace_root(args.workspace)
         preset = load_preset(args.preset)
@@ -638,7 +638,7 @@ def run(args, log, progress):
         for fact in facts:
             log("  " + fact)
         log("conversation: " + (saved or "new chat"))
-        goto(window, tab, saved or NEW_CHAT_URL, args.timeout)
+        goto(tab_id, saved or NEW_CHAT_URL, args.timeout)
         message = opening_message(preset, root, args.task, args.allow_shell,
                                   write=args.write, facts=facts)
         first_round, reply = 1, None
@@ -655,7 +655,7 @@ def run(args, log, progress):
                 log("  " + str(message.count("\n") + 1) + " lines is too wide to "
                     "type - sending as an attachment, which stays in the conversation")
             marker = attempt("send", args.retries, log,
-                             lambda: cgpt.send(window, tab, message))
+                             lambda: cgpt.send(tab_id, message))
             # Checkpoint before waiting: this is the window a crash lands in.
             save_run(name, {
                 "url": progress.get("url"), "root": root, "round": round_number,
@@ -663,10 +663,10 @@ def run(args, log, progress):
             })
             reply = attempt("wait", args.retries, log,
                             lambda: cgpt.wait_for_reply(
-                                window, tab, marker, args.timeout, args.poll))
+                                tab_id, marker, args.timeout, args.poll))
 
         if not progress.get("url"):
-            url = cgpt.eval_js(window, tab, "location.href")
+            url = cgpt.eval_js(tab_id, "location.href")
             if isinstance(url, str) and "/c/" in url:
                 progress["url"] = url
                 log("conversation: " + url)
@@ -745,9 +745,9 @@ def run(args, log, progress):
         # One last exchange, for committing only. Without it the work of the
         # whole run stays in the worktree and dies with the session.
         log("round budget spent - offering a landing round to commit")
-        marker = attempt("send", args.retries, log, lambda: cgpt.send(window, tab, LANDING_ROUND))
+        marker = attempt("send", args.retries, log, lambda: cgpt.send(tab_id, LANDING_ROUND))
         reply = attempt("wait", args.retries, log,
-                        lambda: cgpt.wait_for_reply(window, tab, marker, args.timeout, args.poll))
+                        lambda: cgpt.wait_for_reply(tab_id, marker, args.timeout, args.poll))
         try:
             requested = proto.extract_ops(reply)
         except proto.ProtocolError:
@@ -763,16 +763,16 @@ def run(args, log, progress):
                 budget.charge(len(result.get("body") or ""))
                 results.append(result)
             marker = attempt("send", args.retries, log, lambda: cgpt.send(
-                window, tab, proto.format_results(results) + "\n\n" + LANDED))
+                tab_id, proto.format_results(results) + "\n\n" + LANDED))
             reply = attempt("wait", args.retries, log,
-                            lambda: cgpt.wait_for_reply(window, tab, marker, args.timeout, args.poll))
+                            lambda: cgpt.wait_for_reply(tab_id, marker, args.timeout, args.poll))
         clear_run(name)
         return reply
 
     log("round budget spent - asking for a conclusion")
-    marker = attempt("send", args.retries, log, lambda: cgpt.send(window, tab, BUDGET_SPENT))
+    marker = attempt("send", args.retries, log, lambda: cgpt.send(tab_id, BUDGET_SPENT))
     answer = attempt("wait", args.retries, log,
-                     lambda: cgpt.wait_for_reply(window, tab, marker, args.timeout, args.poll))
+                     lambda: cgpt.wait_for_reply(tab_id, marker, args.timeout, args.poll))
     clear_run(name)
     return answer
 

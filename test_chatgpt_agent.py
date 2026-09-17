@@ -555,7 +555,7 @@ class _FakeCgpt:
         self.sent = []
 
     def ensure_tab(self, timeout):
-        return 1, 1
+        return 101
 
     def bridge(self, *a):
         return "done" if a and a[0] == "loading" else ""
@@ -563,16 +563,16 @@ class _FakeCgpt:
     def needs_attachment(self, message):
         return False
 
-    def send(self, window, tab, message):
+    def send(self, tab_id, message):
         self.sent.append(message)
         return "marker"
 
-    def wait_for_reply(self, window, tab, marker, timeout, poll):
+    def wait_for_reply(self, tab_id, marker, timeout, poll):
         if not self.replies:
             raise AssertionError("the loop asked for more replies than the test gave it")
         return self.replies.pop(0)
 
-    def eval_js(self, window, tab, expr):
+    def eval_js(self, tab_id, expr):
         if "probe" in expr:
             return {"ok": True}
         return "https://chatgpt.com/c/test"

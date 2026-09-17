@@ -74,19 +74,25 @@ class JsStringTest(unittest.TestCase):
 class ParseTabsTest(unittest.TestCase):
     """parse_tabs() reads the tab-separated rows the AppleScript bridge prints."""
 
-    def test_parses_window_tab_and_url(self):
+    def test_parses_window_tab_id_and_url(self):
         self.assertEqual(
-            cgpt.parse_tabs("1\t2\thttps://example.com/"),
-            [(1, 2, "https://example.com/")],
+            cgpt.parse_tabs("1\t2\t314\thttps://example.com/"),
+            [(1, 2, 314, "https://example.com/")],
         )
 
     def test_ignores_blank_lines(self):
-        raw = "1\t1\thttps://a.com/\n\n2\t3\thttps://b.com/\n"
+        raw = "1\t1\t101\thttps://a.com/\n\n2\t3\t202\thttps://b.com/\n"
         self.assertEqual(len(cgpt.parse_tabs(raw)), 2)
 
     def test_keeps_url_containing_tab_separator_characters(self):
-        raw = "1\t1\thttps://a.com/?x=1&y=2"
-        self.assertEqual(cgpt.parse_tabs(raw)[0][2], "https://a.com/?x=1&y=2")
+        raw = "1\t1\t314\thttps://a.com/?x=1&y=2"
+        self.assertEqual(cgpt.parse_tabs(raw)[0][3], "https://a.com/?x=1&y=2")
+
+    def test_rejects_the_old_three_column_format(self):
+        self.assertEqual(cgpt.parse_tabs("1\t2\thttps://example.com/"), [])
+
+    def test_rejects_non_integer_tab_ids(self):
+        self.assertEqual(cgpt.parse_tabs("1\t2\tnot-an-id\thttps://example.com/"), [])
 
     def test_returns_empty_list_for_empty_output(self):
         self.assertEqual(cgpt.parse_tabs(""), [])
@@ -96,26 +102,26 @@ class FindChatgptTabTest(unittest.TestCase):
     """find_chatgpt_tab() must match on host, not on a substring of the URL."""
 
     def test_finds_chatgpt_com(self):
-        tabs = [(1, 1, "https://news.example.com/"), (1, 2, "https://chatgpt.com/c/abc")]
-        self.assertEqual(cgpt.find_chatgpt_tab(tabs), (1, 2))
+        tabs = [(1, 1, 101, "https://news.example.com/"), (1, 2, 202, "https://chatgpt.com/c/abc")]
+        self.assertEqual(cgpt.find_chatgpt_tab(tabs), 202)
 
     def test_finds_legacy_chat_openai_com(self):
-        tabs = [(2, 5, "https://chat.openai.com/c/xyz")]
-        self.assertEqual(cgpt.find_chatgpt_tab(tabs), (2, 5))
+        tabs = [(2, 5, 505, "https://chat.openai.com/c/xyz")]
+        self.assertEqual(cgpt.find_chatgpt_tab(tabs), 505)
 
     def test_returns_first_match_so_conversation_is_reused(self):
-        tabs = [(1, 1, "https://chatgpt.com/c/first"), (1, 2, "https://chatgpt.com/c/second")]
-        self.assertEqual(cgpt.find_chatgpt_tab(tabs), (1, 1))
+        tabs = [(1, 1, 101, "https://chatgpt.com/c/first"), (1, 2, 202, "https://chatgpt.com/c/second")]
+        self.assertEqual(cgpt.find_chatgpt_tab(tabs), 101)
 
     def test_returns_none_when_no_chatgpt_tab(self):
-        self.assertIsNone(cgpt.find_chatgpt_tab([(1, 1, "https://example.com/")]))
+        self.assertIsNone(cgpt.find_chatgpt_tab([(1, 1, 101, "https://example.com/")]))
 
     def test_does_not_match_other_host_mentioning_chatgpt_in_query(self):
-        tabs = [(1, 1, "https://evil.example.com/?redirect=https://chatgpt.com/")]
+        tabs = [(1, 1, 101, "https://evil.example.com/?redirect=https://chatgpt.com/")]
         self.assertIsNone(cgpt.find_chatgpt_tab(tabs))
 
     def test_does_not_match_lookalike_host(self):
-        self.assertIsNone(cgpt.find_chatgpt_tab([(1, 1, "https://notchatgpt.com/")]))
+        self.assertIsNone(cgpt.find_chatgpt_tab([(1, 1, 101, "https://notchatgpt.com/")]))
 
 
 class StabilityTrackerTest(unittest.TestCase):
@@ -233,13 +239,32 @@ class BridgeIntegrationTest(unittest.TestCase):
         self.assertNotRegex(raw, r"^\d+tab\d+tab")
 
     def test_every_row_carries_a_plausible_url(self):
-        for _, _, url in cgpt.parse_tabs(cgpt.bridge("list")):
+        for _, _, _, url in cgpt.parse_tabs(cgpt.bridge("list")):
             self.assertRegex(url, r"^[a-z][a-z0-9+.-]*:")
 
     def test_loading_reports_a_known_state(self):
         tabs = cgpt.parse_tabs(cgpt.bridge("list"))
-        window_index, tab_index, _ = tabs[0]
-        self.assertIn(cgpt.bridge("loading", window_index, tab_index), ("loading", "done"))
+        _, _, tab_id, _ = tabs[0]
+        self.assertIn(cgpt.bridge("loading", tab_id), ("loading", "done"))
+
+    def test_stable_id_survives_an_earlier_tab_closing(self):
+        first = int(cgpt.bridge("open", "about:blank"))
+        second = int(cgpt.bridge("open", "about:blank"))
+        try:
+            cgpt.bridge("close", first)
+            self.assertEqual(cgpt.bridge("eval", "String(40 + 2)", second), "42")
+        finally:
+            try:
+                cgpt.bridge("close", second)
+            except cgpt.TabGone:
+                pass
+
+    def test_unknown_tab_id_fails_loudly(self):
+        ids = [tab_id for _, _, tab_id, _ in cgpt.parse_tabs(cgpt.bridge("list"))]
+        missing = (max(ids) + 1000000) if ids else 1000000
+        with self.assertRaises(cgpt.TabGone) as caught:
+            cgpt.bridge("loading", missing)
+        self.assertIn(str(missing), str(caught.exception))
 
 
 class ReadPromptTest(unittest.TestCase):
@@ -341,7 +366,7 @@ class AttachPayloadTest(unittest.TestCase):
         cgpt.ATTACH_SETTLE = self._real_settle
         sys.stderr = self._real_stderr
 
-    def _fake_eval(self, window_index, tab_index, expression):
+    def _fake_eval(self, tab_id, expression):
         if expression.startswith("CGPT.attach("):
             self.attaches += 1
             return {"ok": True, "error": None}
@@ -350,22 +375,22 @@ class AttachPayloadTest(unittest.TestCase):
         return {"ok": True, "error": None}
 
     def test_a_warm_page_attaches_exactly_once(self):
-        cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        cgpt.attach_payload(101, "payload", "c2c-aaaa1111.txt")
         self.assertEqual(self.attaches, 1)
 
     def test_a_warm_page_says_nothing(self):
-        cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        cgpt.attach_payload(101, "payload", "c2c-aaaa1111.txt")
         self.assertEqual(self.stderr.getvalue(), "")
 
     def test_a_cold_page_is_re_attached_until_the_chip_appears(self):
         self.chip_after = 2
-        cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        cgpt.attach_payload(101, "payload", "c2c-aaaa1111.txt")
         self.assertEqual(self.attaches, 2)
 
     def test_every_retry_is_announced(self):
         # Silence here would hide the only signal that says the tab was cold.
         self.chip_after = 2
-        cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+        cgpt.attach_payload(101, "payload", "c2c-aaaa1111.txt")
         said = self.stderr.getvalue()
         self.assertIn("c2c-aaaa1111.txt", said)
         self.assertIn("try 2", said)
@@ -373,18 +398,18 @@ class AttachPayloadTest(unittest.TestCase):
     def test_a_page_that_never_takes_the_file_raises(self):
         self.chip_after = 99
         with self.assertRaises(cgpt.CliError):
-            cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt", tries=2)
+            cgpt.attach_payload(101, "payload", "c2c-aaaa1111.txt", tries=2)
 
     def test_it_gives_up_after_the_allotted_tries(self):
         self.chip_after = 99
         try:
-            cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt", tries=2)
+            cgpt.attach_payload(101, "payload", "c2c-aaaa1111.txt", tries=2)
         except cgpt.CliError:
             pass
         self.assertEqual(self.attaches, 2)
 
     def test_a_refused_attachment_is_not_retried_into_the_ground(self):
-        def refuses(window_index, tab_index, expression):
+        def refuses(tab_id, expression):
             if expression.startswith("CGPT.attach("):
                 self.attaches += 1
                 return {"ok": False, "error": "file-input-not-found"}
@@ -392,7 +417,7 @@ class AttachPayloadTest(unittest.TestCase):
 
         cgpt.eval_js = refuses
         with self.assertRaises(cgpt.CliError):
-            cgpt.attach_payload(1, 1, "payload", "c2c-aaaa1111.txt")
+            cgpt.attach_payload(101, "payload", "c2c-aaaa1111.txt")
         self.assertEqual(self.attaches, 1)
 
 
@@ -416,7 +441,7 @@ class SendTypedTextTest(unittest.TestCase):
     def tearDown(self):
         cgpt.eval_js = self._real_eval
 
-    def _fake_eval(self, window_index, tab_index, expression):
+    def _fake_eval(self, tab_id, expression):
         self.calls.append(expression)
         if expression.startswith("CGPT.attachmentReady("):
             return {"ok": True, "ready": True}
@@ -435,30 +460,30 @@ class SendTypedTextTest(unittest.TestCase):
         return json.loads(call[len("CGPT.insert("):-1]) if call else None
 
     def test_the_typed_text_never_carries_the_attachment_name(self):
-        marker = cgpt.send(1, 1, self.BIG)
+        marker = cgpt.send(101, self.BIG)
         self.assertNotIn(cgpt.attachment_name(marker), self._typed())
 
     def test_the_typed_text_still_carries_the_marker(self):
-        marker = cgpt.send(1, 1, self.BIG)
+        marker = cgpt.send(101, self.BIG)
         self.assertIn(marker, self._typed())
 
     def test_the_payload_itself_is_not_typed(self):
-        cgpt.send(1, 1, self.BIG)
+        cgpt.send(101, self.BIG)
         self.assertNotIn("line 299", self._typed())
 
     def test_the_attachment_call_does_carry_the_name(self):
         # Proves this test exercises the attach path at all, so the assertion
         # above is about a name that genuinely exists somewhere in the run.
-        marker = cgpt.send(1, 1, self.BIG)
+        marker = cgpt.send(101, self.BIG)
         self.assertIn(cgpt.attachment_name(marker), self._call("CGPT.attach("))
 
     def test_a_small_prompt_is_typed_whole_and_never_attached(self):
-        marker = cgpt.send(1, 1, "review this")
+        marker = cgpt.send(101, "review this")
         self.assertIn("review this", self._typed())
         self.assertIsNone(self._call("CGPT.attach("))
 
     def test_send_refuses_when_the_turn_arrived_without_the_file(self):
-        def carried_nothing(window_index, tab_index, expression):
+        def carried_nothing(tab_id, expression):
             self.calls.append(expression)
             if expression.startswith("CGPT.attachmentReady("):
                 return {"ok": True, "ready": True}
@@ -468,7 +493,7 @@ class SendTypedTextTest(unittest.TestCase):
 
         cgpt.eval_js = carried_nothing
         with self.assertRaises(cgpt.CliError):
-            cgpt.send(1, 1, self.BIG)
+            cgpt.send(101, self.BIG)
 
 
 class AttachedNoteTest(unittest.TestCase):
@@ -518,3 +543,69 @@ class MakeMarkerTest(unittest.TestCase):
 
     def test_marker_is_short_enough_to_stay_out_of_the_way(self):
         self.assertLess(len(cgpt.make_marker()), 20)
+
+
+class MainWiringTest(unittest.TestCase):
+    """main() must pass the browser plumbing whatever ensure_tab hands back.
+
+    Regression: when tab addressing moved from a (window, tab) pair to a single
+    id, every *use* of the id inside main() was updated and the two lines that
+    *produce* it were not. The module imported, compiled and unit-tested clean;
+    the CLI died on its first line of real work with a ValueError. Nothing in
+    the suite ran main(), so nothing noticed.
+    """
+
+    def _run_main(self, argv=("hello",)):
+        calls = {}
+
+        def ensure_tab(timeout):
+            calls["ensure_tab"] = timeout
+            return 4242
+
+        def bridge(*args):
+            calls.setdefault("bridge", []).append(args)
+            return "ok"
+
+        def eval_js(tab_id, expression):
+            calls.setdefault("eval_js", []).append((tab_id, expression))
+            return {"ok": True}
+
+        def send(tab_id, text):
+            calls["send"] = (tab_id, text)
+            return "[c2c:deadbeef]"
+
+        def wait_for_reply(tab_id, marker, timeout, poll):
+            calls["wait_for_reply"] = (tab_id, marker)
+            return "the answer"
+
+        patched = {
+            "ensure_tab": ensure_tab, "bridge": bridge, "eval_js": eval_js,
+            "send": send, "wait_for_reply": wait_for_reply,
+        }
+        saved = {name: getattr(cgpt, name) for name in patched}
+        for name, fake in patched.items():
+            setattr(cgpt, name, fake)
+        stdout, sys.stdout = sys.stdout, io.StringIO()
+        try:
+            code = cgpt.main(argv)
+        finally:
+            sys.stdout = stdout
+            for name, original in saved.items():
+                setattr(cgpt, name, original)
+        return code, calls
+
+    def test_main_completes_and_carries_one_tab_handle_throughout(self):
+        code, calls = self._run_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(calls["send"][0], 4242)
+        self.assertEqual(calls["wait_for_reply"][0], 4242)
+        self.assertEqual(calls["eval_js"][0][0], 4242)
+
+    def test_focus_addresses_the_same_tab(self):
+        code, calls = self._run_main(argv=("--focus", "hello"))
+        self.assertEqual(code, 0)
+        self.assertEqual(calls["bridge"], [("focus", 4242)])
+
+    def test_no_bridge_call_when_focus_is_not_asked_for(self):
+        _, calls = self._run_main()
+        self.assertNotIn("bridge", calls)

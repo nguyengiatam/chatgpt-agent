@@ -257,5 +257,48 @@ class BlankAnswerTest(unittest.TestCase):
     def test_a_fence_plus_prose_is_not_blank(self):
         self.assertFalse(proto.is_blank_answer("```c\n\n```\n\nNOT-GO: one finding."))
 
+
+class StillRenderingTest(unittest.TestCase):
+    """A half-drawn message must be waited out, not answered."""
+
+    def test_a_c2c_body_cut_mid_token_is_still_rendering(self):
+        # Measured: this is what the DOM held mid-render, three runs in a row.
+        self.assertTrue(proto.is_still_rendering('```c2c\n{"ops":[{"op":"git\n```'))
+
+    def test_an_unclosed_fence_is_still_rendering(self):
+        self.assertTrue(proto.is_still_rendering('```c2c\n{"ops":[]}'))
+
+    def test_a_complete_request_is_not(self):
+        self.assertFalse(
+            proto.is_still_rendering('```c2c\n{"ops":[{"op":"read","path":"x"}]}\n```')
+        )
+
+    def test_plain_prose_is_not(self):
+        self.assertFalse(proto.is_still_rendering("GO - nothing found."))
+
+    def test_a_broken_block_in_another_language_is_not_our_business(self):
+        self.assertFalse(proto.is_still_rendering("```python\nnot json\n```"))
+
+
+class UntaggedRequestTest(unittest.TestCase):
+    """The c2c label arrives late; a block shaped like a request is still one."""
+
+    def test_an_untagged_request_shape_is_read_as_a_request(self):
+        ops = proto.extract_ops('```\n{"ops":[{"op":"read","path":"x"}]}\n```')
+        self.assertEqual(ops, [{"op": "read", "path": "x"}])
+
+    def test_an_untagged_json_block_that_is_not_a_request_is_left_alone(self):
+        self.assertIsNone(proto.extract_ops('```\n{"total": 3}\n```'))
+
+    def test_an_untagged_non_json_block_is_left_alone(self):
+        self.assertIsNone(proto.extract_ops("```\nGO - nothing found.\n```"))
+
+    def test_a_tagged_block_still_wins_over_an_untagged_one(self):
+        reply = (
+            '```\n{"ops":[{"op":"read","path":"first"}]}\n```\n\n'
+            '```c2c\n{"ops":[{"op":"read","path":"second"}]}\n```'
+        )
+        self.assertEqual(proto.extract_ops(reply), [{"op": "read", "path": "second"}])
+
 if __name__ == "__main__":
     unittest.main()

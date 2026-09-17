@@ -19,6 +19,9 @@ import sys
 import time
 import uuid
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chatgpt_protocol as proto  # noqa: E402  (path set just above)
+
 try:
     from urllib.parse import urlsplit
 except ImportError:  # pragma: no cover - py2 never supported, kept explicit
@@ -114,6 +117,10 @@ class StabilityTracker:
         self._stable = self._stable + 1 if text == self._last_text else 0
         self._last_text = text
         return self._stable >= self.stable_polls
+
+    def reset(self):
+        """Forget the run of stable samples - the message was not done after all."""
+        self._stable = 0
 
 
 # --- browser plumbing ------------------------------------------------------
@@ -373,7 +380,13 @@ def wait_for_reply(window_index, tab_index, marker, timeout, poll):
             latest.get("isLast", False),
             latest.get("text", ""),
         ):
-            return latest.get("markdown", "")
+            markdown = latest.get("markdown", "")
+            # Settled text is not a settled message: the code block is still
+            # being rebuilt around it. Sampling here yields a truncated request.
+            if proto.is_still_rendering(markdown):
+                tracker.reset()
+                continue
+            return markdown
     raise CliError(
         "Timed out after " + str(timeout) + "s waiting for the reply "
         "(our message found: " + str(latest.get("found")) + ", "

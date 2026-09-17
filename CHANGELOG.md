@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.4
+
+**Fixed: replies were read while the code block was still being drawn.** 0.3.3
+stopped a malformed block from ending a run quietly; this fixes why the block
+was malformed. It was never the model: sampled after the run failed, the very
+same three messages held complete, valid JSON.
+
+Two time-dependencies, both measured on a live conversation:
+
+- **The body is captured mid-rebuild.** `StabilityTracker` returns as soon as
+  the message's `textContent` holds still for two polls, but ChatGPT keeps
+  restructuring the code block after the text plateaus. Every failed capture was
+  cut mid-token — `{"ops":[{"op":"git`, `{"ops":[{"`, three runs in a row.
+- **The language label lands late.** ChatGPT renders it as a header element
+  beside the code, not as a class on `<code>` (measured: `class` is empty).
+  Immediately after a page load the same node rendered as an untagged fence; a
+  moment later, as ```` ```c2c ````. An untagged block is not recognised as a
+  request, so a whole round is lost.
+
+- `proto.is_still_rendering` treats a c2c fence whose body does not parse, or an
+  odd number of fences, as "not finished". `wait_for_reply` resets the stability
+  run and keeps polling instead of returning a half-drawn message.
+- `extract_ops` now also accepts an **untagged** fence whose body is exactly the
+  protocol shape — a dict with a non-empty `ops` list. A tagged block still wins,
+  and an untagged block of anything else is left alone.
+
+Together with 0.3.3 the failure is contained twice over: the reply is no longer
+read early, and if a bad block still arrives it is re-asked rather than saved.
+
+
+
 ## 0.3.3
 
 **Fixed: a malformed `c2c` block could end a run with an empty result.** The

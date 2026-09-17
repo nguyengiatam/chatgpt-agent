@@ -19,6 +19,9 @@ _FENCE = re.compile(r"^```([^\n]*)\n(.*?)^```[ \t]*$", re.DOTALL | re.MULTILINE)
 
 _BACKTICK_RUN = re.compile(r"`+")
 
+# Fence openers and closers, counted to spot a block that has not closed yet.
+_FENCE_LINE = re.compile(r"^```", re.MULTILINE)
+
 
 class ProtocolError(Exception):
     """The model's request could not be understood. The text is sent back to it."""
@@ -30,11 +33,58 @@ def extract_ops(reply):
     Raises ProtocolError when a c2c block exists but does not hold a usable
     request - the caller turns that into one corrective turn.
     """
+    untagged = None
     for match in _FENCE.finditer(reply or ""):
+        tag = match.group(1).strip().lower()
+        if tag == "c2c":
+            return _parse_request(match.group(2))
+        # ChatGPT puts the language in a header element beside the code, not on
+        # the <code>, and that header lands late: sampled early, the same block
+        # renders with no tag at all. An untagged block shaped exactly like a
+        # request is one of ours, and losing it costs a whole round.
+        if not tag and untagged is None and _looks_like_request(match.group(2)):
+            untagged = match.group(2)
+    if untagged is not None:
+        return _parse_request(untagged)
+    return None
+
+
+def _looks_like_request(raw):
+    """True only for the protocol's own shape: {"ops": [...]} with entries."""
+    try:
+        payload = json.loads(raw, strict=False)
+    except ValueError:
+        return False
+    return (
+        isinstance(payload, dict)
+        and isinstance(payload.get("ops"), list)
+        and bool(payload["ops"])
+    )
+
+
+def is_still_rendering(reply):
+    """True when `reply` looks like a half-drawn message rather than a finished one.
+
+    ChatGPT rebuilds a code block while it streams: the body arrives in pieces
+    and the language label is attached by a separate header element that lands
+    late. Sampling in that window yields a closed ```c2c fence whose body is cut
+    mid-token - measured repeatedly, e.g. `{"ops":[{"op":"git`. Treating that as
+    the model's mistake burns a round and, three times over, the whole run.
+
+    A finished request always parses. So: a c2c block that does not, or an odd
+    number of fences, means keep waiting rather than keep asking.
+    """
+    text = reply or ""
+    if len(_FENCE_LINE.findall(text)) % 2:
+        return True
+    for match in _FENCE.finditer(text):
         if match.group(1).strip().lower() != "c2c":
             continue
-        return _parse_request(match.group(2))
-    return None
+        try:
+            json.loads(match.group(2), strict=False)
+        except ValueError:
+            return True
+    return False
 
 
 def is_blank_answer(reply):

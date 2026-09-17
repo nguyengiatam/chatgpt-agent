@@ -556,6 +556,39 @@ def _same_conversation(left, right):
     return left == right
 
 
+def track_conversation(tab_id, progress, held, args, log):
+    """Follow the conversation id, which is not settled when it first appears.
+
+    Measured 2026-09-17: a new chat's URL first carries a client-side
+    placeholder - /c/WEB:849fd09c-... - and the server-assigned id replaces it
+    moments later. Recording the first thing seen bound the session to a URL
+    that never resolves again, and put the conversation claim on an id no other
+    run could ever collide with, so the claim protected nothing.
+
+    Nothing here recognises the placeholder's shape. Following the id whenever
+    it changes covers this form and whatever the next one turns out to be.
+    """
+    try:
+        url = cgpt.eval_js(tab_id, "location.href")
+    except cgpt.TabGone:
+        if progress.get("url"):
+            raise
+        raise cgpt.CliError(
+            "The tab disappeared after the round was sent but before its "
+            "conversation URL could be recorded. Re-sending could duplicate "
+            "the round, so recovery stops here."
+        )
+    if not isinstance(url, str) or "/c/" not in url:
+        return
+    if _same_conversation(url, progress.get("url")):
+        return
+    progress["url"] = url
+    held.claim_conversation(claims.conversation_id(url))
+    log("conversation: " + url)
+    if args.session:
+        save_session(args.session, url, tab_id)
+
+
 def resolve_session_tab(entry, timeout):
     """Return a binding only if its tab still shows this exact conversation.
 
@@ -842,20 +875,7 @@ def run(args, log, progress):
             # A new chat gains its durable /c/<id> URL when the first turn lands.
             # Capture it before waiting so a vanished tab can be reopened without
             # guessing which conversation accepted the already-sent round.
-            if not progress.get("url"):
-                try:
-                    current_url = cgpt.eval_js(tab_id, "location.href")
-                except cgpt.TabGone:
-                    raise cgpt.CliError(
-                        "The tab disappeared after the round was sent but before its "
-                        "conversation URL could be recorded. Re-sending could duplicate "
-                        "the round, so recovery stops here."
-                    )
-                if isinstance(current_url, str) and "/c/" in current_url:
-                    progress["url"] = current_url
-                    held.claim_conversation(claims.conversation_id(current_url))
-                    if args.session:
-                        save_session(args.session, current_url, tab_id)
+            track_conversation(tab_id, progress, held, args, log)
 
             # Checkpoint before waiting: this is the window a crash lands in.
             save_run(name, {
@@ -865,14 +885,7 @@ def run(args, log, progress):
             reply, tab_id = wait_with_tab_recovery(
                 tab_id, marker, progress.get("url"), held, args, recovery, log)
 
-        if not progress.get("url"):
-            url = cgpt.eval_js(tab_id, "location.href")
-            if isinstance(url, str) and "/c/" in url:
-                progress["url"] = url
-                held.claim_conversation(claims.conversation_id(url))
-                log("conversation: " + url)
-                if args.session:
-                    save_session(args.session, url, tab_id)
+        track_conversation(tab_id, progress, held, args, log)
 
         try:
             requested = proto.extract_ops(reply)

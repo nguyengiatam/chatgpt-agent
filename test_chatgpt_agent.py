@@ -564,6 +564,9 @@ class _FakeCgpt:
     def ensure_tab(self, timeout):
         return 101
 
+    def open_tab(self, url, timeout):
+        return 101
+
     def bridge(self, *a):
         return "done" if a and a[0] == "loading" else ""
 
@@ -1046,3 +1049,90 @@ class WaitRecoveryHelperTest(unittest.TestCase):
         self.assertEqual(agent.cgpt.waits, [11, 22])
         self.assertEqual(held.events, [("release", 11), ("claim", 22)])
         self.assertTrue(recovery["used"])
+
+
+class ConversationIdSettlesLateTest(unittest.TestCase):
+    """The first URL a new chat shows is not the one it keeps.
+
+    Measured against the real page on 2026-09-17: the first read gave
+    /c/WEB:849fd09c-5574-4c1a-95b7-4068782180f1 and the same tab was on
+    /c/6aabe307-d930-83ec-bf38-9fa2bbfa51f6 shortly after. Binding to the first
+    one left a session that could never reopen its conversation, and put the
+    conversation claim on an id nothing else would ever ask for - a claim that
+    protected nothing.
+    """
+
+    PLACEHOLDER = "https://chatgpt.com/c/WEB:849fd09c-5574-4c1a-95b7-4068782180f1"
+    SETTLED = "https://chatgpt.com/c/6aabe307-d930-83ec-bf38-9fa2bbfa51f6"
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self._runs, agent.RUNS_DIR = agent.RUNS_DIR, os.path.join(self.dir, "runs")
+        self._state, agent.STATE_DIR = agent.STATE_DIR, self.dir
+        self._sessions, agent.SESSIONS = agent.SESSIONS, os.path.join(self.dir, "sessions.json")
+        self._lock, agent.SESSIONS_LOCK = agent.SESSIONS_LOCK, os.path.join(self.dir, "sessions.lock")
+        self._claims, agent.claims.CLAIM_DIR = agent.claims.CLAIM_DIR, os.path.join(self.dir, "claims")
+        self._cgpt, self._ops, self._goto = agent.cgpt, agent.ops, agent.goto
+        agent.ops = _FakeOps()
+        agent.goto = lambda *a, **k: None
+
+    def tearDown(self):
+        agent.RUNS_DIR, agent.STATE_DIR, agent.SESSIONS = self._runs, self._state, self._sessions
+        agent.SESSIONS_LOCK, agent.claims.CLAIM_DIR = self._lock, self._claims
+        agent.cgpt, agent.ops, agent.goto = self._cgpt, self._ops, self._goto
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_the_binding_follows_the_id_the_conversation_settles_on(self):
+        outer = self
+        seen = []
+
+        class Cgpt(_FakeCgpt):
+            def eval_js(self, tab_id, expr):
+                if "probe" in expr:
+                    return {"ok": True}
+                seen.append(expr)
+                return outer.PLACEHOLDER if len(seen) == 1 else outer.SETTLED
+
+        agent.cgpt = Cgpt(['```c2c\n{"ops":[{"op":"list","path":"."}]}\n```',
+                           "GO - nothing found."])
+        args = argparse.Namespace(
+            workspace=self.dir, preset="review", task="t", session="bound", new=True,
+            resume=False, write=False, allow_shell=False, focus=False,
+            max_rounds=4, max_chars=10000, round_chars=5000, timeout=1, poll=0,
+            retries=1,
+        )
+        agent.run(args, lambda line: None, {})
+
+        entry = agent.load_sessions()["bound"]
+        self.assertEqual(entry["url"], self.SETTLED,
+                         "the session stayed bound to the placeholder id")
+
+    def test_the_claim_lands_on_the_settled_conversation(self):
+        outer = self
+        seen = []
+
+        class Cgpt(_FakeCgpt):
+            def eval_js(self, tab_id, expr):
+                if "probe" in expr:
+                    return {"ok": True}
+                seen.append(expr)
+                return outer.PLACEHOLDER if len(seen) == 1 else outer.SETTLED
+
+        agent.cgpt = Cgpt(['```c2c\n{"ops":[{"op":"list","path":"."}]}\n```',
+                           "GO - nothing found."])
+        args = argparse.Namespace(
+            workspace=self.dir, preset="review", task="t", session=None, new=True,
+            resume=False, write=False, allow_shell=False, focus=False,
+            max_rounds=4, max_chars=10000, round_chars=5000, timeout=1, poll=0,
+            retries=1,
+        )
+        agent.run(args, lambda line: None, {})
+
+        # Claims are registered per process, so the registry - not the claim
+        # directory - is where a claim taken in this process is observable.
+        settled = ("conversation", agent.claims.conversation_id(self.SETTLED))
+        placeholder = ("conversation", agent.claims.conversation_id(self.PLACEHOLDER))
+        self.assertIn(settled, agent.claims._HELD,
+                      "the settled conversation was never claimed")
+        self.assertIn(placeholder, agent.claims._HELD,
+                      "the placeholder was expected to have been claimed first")

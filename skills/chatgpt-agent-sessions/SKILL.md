@@ -18,4 +18,15 @@ Forget a saved session by name:
 python3 ./chatgpt-agent.py --forget "$ARGUMENTS"
 ```
 
-Review and plan skills can resume a session with `--session <name>` or start a fresh conversation with `--new`. Do not modify session state unless the user explicitly asks.
+List what is stale enough to drop, from both the session store and the
+checkpoints left by interrupted runs:
+
+```bash
+python3 ./chatgpt-agent.py --prune
+```
+
+This prints and deletes nothing. Add `--yes` to remove the listed rows,
+`--days <n>` for a different age line, `--all` to ignore age entirely. Every run
+already prunes what is older than 14 days, so this is for clearing something now.
+
+Review and plan skills can resume a session with `--session <name>` or start a fresh conversation with `--new`. Do not modify session state unless the user explicitly asks — that includes `--prune --yes` and `--forget`.

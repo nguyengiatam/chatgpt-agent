@@ -15,6 +15,7 @@ capabilities are chatgpt_ops, which has no write and no shell.
 """
 
 import argparse
+import calendar
 import importlib.util
 import json
 import os
@@ -38,6 +39,12 @@ SESSIONS = os.path.join(STATE_DIR, "sessions.json")
 RUNS_DIR = os.path.join(STATE_DIR, "runs")
 NEW_CHAT_URL = "https://chatgpt.com/"
 DEFAULT_RUN = "_last"
+
+# How long state is kept before a run drops it on its way past. A checkpoint is
+# dead the moment its run finished, and one that is still worth resuming is
+# hours old, not weeks; two weeks leaves room for an interrupted run to be
+# picked up after a holiday and still bounds both stores.
+STATE_TTL_DAYS = 14
 
 # Characters of workspace data one run may serve, and one round within it.
 RUN_CHARS = 250000
@@ -199,26 +206,104 @@ DATA_SPENT_WRITE = (
 )
 
 
+# --- time ------------------------------------------------------------------
+#
+# Stamps are written as UTC text so the store stays readable by hand, and read
+# back through one pair of helpers so an unparseable stamp is a None everywhere
+# rather than a crash in whichever caller met it first.
+
+STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _stamp_from_epoch(seconds):
+    return time.strftime(STAMP_FORMAT, time.gmtime(seconds))
+
+
+def _now_stamp():
+    return _stamp_from_epoch(time.time())
+
+
+def _stamp_seconds(stamp):
+    """Epoch seconds for a stored stamp, or None when it cannot be read."""
+    try:
+        return calendar.timegm(time.strptime(stamp, STAMP_FORMAT))
+    except (TypeError, ValueError):
+        return None
+
+
+def _age_days(seconds, now=None):
+    return ((time.time() if now is None else now) - seconds) / 86400.0
+
+
+def _format_age(age):
+    if age is None:
+        return "unknown age"
+    if age < 1:
+        return "today"
+    if age < 2:
+        return "1 day"
+    return str(int(age)) + " days"
+
+
 # --- session store ---------------------------------------------------------
+#
+# A bookmark is {url, updated}. Before 0.5.0 it was a bare URL string with no
+# stamp at all, which is why nothing could tell a bookmark from last quarter
+# from one made this morning; those entries are dated from the store's own
+# mtime so they age out like any other instead of living forever.
 
 
 def load_sessions():
     try:
         with open(SESSIONS, "r") as handle:
-            return json.load(handle)
+            raw = json.load(handle)
     except (IOError, OSError, ValueError):
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    try:
+        fallback = _stamp_from_epoch(os.path.getmtime(SESSIONS))
+    except OSError:
+        fallback = None
+    sessions = {}
+    for name, entry in raw.items():
+        if isinstance(entry, str):
+            sessions[name] = {"url": entry, "updated": fallback}
+        elif isinstance(entry, dict) and isinstance(entry.get("url"), str):
+            sessions[name] = {"url": entry["url"],
+                              "updated": entry.get("updated") or fallback}
+    return sessions
 
 
-def save_session(name, url):
-    sessions = load_sessions()
-    sessions[name] = url
+def session_url(name):
+    entry = load_sessions().get(name)
+    return entry.get("url") if entry else None
+
+
+def write_sessions(sessions):
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         with open(SESSIONS, "w") as handle:
             json.dump(sessions, handle, indent=2)
     except OSError:
         pass  # a lost bookmark is not worth failing a finished review over
+
+
+def save_session(name, url):
+    sessions = load_sessions()
+    sessions[name] = {"url": url, "updated": _now_stamp()}
+    write_sessions(sessions)
+
+
+def touch_session(name):
+    """A session being reused is in use, whatever its age says. Without this a
+    conversation returned to every week would still be pruned as stale."""
+    sessions = load_sessions()
+    entry = sessions.get(name)
+    if not entry:
+        return
+    entry["updated"] = _now_stamp()
+    write_sessions(sessions)
 
 
 # --- run state -------------------------------------------------------------
@@ -255,6 +340,73 @@ def clear_run(name):
         os.remove(_run_path(name))
     except OSError:
         pass
+
+
+# --- pruning ---------------------------------------------------------------
+#
+# Both stores are append-only in normal use: clear_run() fires when a run ends
+# cleanly, but a run killed mid-flight leaves its checkpoint behind forever,
+# and a bookmark is never dropped at all. Pruning is planned and applied
+# separately so the caller can show the list before anything is deleted.
+
+
+def prune_plan(days=STATE_TTL_DAYS, keep=(), now=None):
+    """What is old enough to drop, as (kind, name, age_in_days) rows.
+
+    days=None means every age qualifies. keep names what this moment depends
+    on - the run being checkpointed right now, and the session it is using -
+    because deleting either mid-flight throws away the resume they exist for.
+    A stamp that cannot be read is never stale: it is dropped only when the
+    caller asked for everything.
+    """
+    victims = []
+    try:
+        entries = sorted(os.listdir(RUNS_DIR))
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.endswith(".json"):
+            continue
+        name = entry[:-len(".json")]
+        if name in keep:
+            continue
+        try:
+            age = _age_days(os.path.getmtime(os.path.join(RUNS_DIR, entry)), now)
+        except OSError:
+            continue
+        if days is None or age >= days:
+            victims.append(("run", name, age))
+    for name, entry in sorted(load_sessions().items()):
+        if name in keep:
+            continue
+        seconds = _stamp_seconds(entry.get("updated"))
+        age = None if seconds is None else _age_days(seconds, now)
+        if days is None or (age is not None and age >= days):
+            victims.append(("session", name, age))
+    return victims
+
+
+def prune_apply(victims):
+    """Delete what prune_plan() listed. Sessions are rewritten once, so a store
+    that cannot be written loses nothing rather than half of it."""
+    names = [name for kind, name, _ in victims if kind == "session"]
+    for kind, name, _ in victims:
+        if kind == "run":
+            clear_run(name)
+    if names:
+        sessions = load_sessions()
+        for name in names:
+            sessions.pop(name, None)
+        write_sessions(sessions)
+    return victims
+
+
+def describe_prune(victims):
+    counts = [("checkpoint", len([v for v in victims if v[0] == "run"])),
+              ("session", len([v for v in victims if v[0] == "session"]))]
+    parts = [str(count) + " " + word + ("" if count == 1 else "s")
+             for word, count in counts if count]
+    return ", ".join(parts) or "nothing"
 
 
 # --- workspace -------------------------------------------------------------
@@ -446,6 +598,13 @@ def run(args, log, progress):
     budget = proto.Budget(args.max_chars, args.round_chars)
     name = args.session or DEFAULT_RUN
 
+    # Housekeeping before this run adds state of its own. Whatever it is about
+    # to write is held out of the plan, so a --resume is never the thing swept.
+    dropped = prune_apply(prune_plan(keep=(name,)))
+    if dropped:
+        log("pruned " + describe_prune(dropped) + " older than "
+            + str(STATE_TTL_DAYS) + " days")
+
     window, tab = cgpt.ensure_tab(args.timeout)
     if args.focus:
         cgpt.bridge("focus", window, tab)
@@ -469,7 +628,9 @@ def run(args, log, progress):
     else:
         root = workspace_root(args.workspace)
         preset = load_preset(args.preset)
-        saved = load_sessions().get(args.session) if (args.session and not args.new) else None
+        saved = session_url(args.session) if (args.session and not args.new) else None
+        if saved:
+            touch_session(args.session)
         facts = workspace_facts(root)
         log("workspace: " + root + (" (write)" if args.write else ""))
         log("  data budget: " + str(args.max_chars) + " chars, "
@@ -654,6 +815,15 @@ def build_parser():
     parser.add_argument("--quiet", action="store_true", help="no progress on stderr")
     parser.add_argument("--list-sessions", action="store_true", help="print saved sessions and exit")
     parser.add_argument("--forget", default=None, help="drop a saved session and exit")
+    parser.add_argument("--prune", action="store_true",
+                        help="list dead checkpoints and stale sessions, then exit "
+                             "(nothing is deleted without --yes)")
+    parser.add_argument("--days", type=int, default=STATE_TTL_DAYS,
+                        help="age --prune calls stale (default: %d)" % STATE_TTL_DAYS)
+    parser.add_argument("--all", dest="prune_all", action="store_true",
+                        help="with --prune: every checkpoint and session, whatever its age")
+    parser.add_argument("--yes", action="store_true",
+                        help="with --prune: delete instead of listing")
     return parser
 
 
@@ -664,7 +834,10 @@ def main(argv=None):
     if args.list_sessions:
         sessions = load_sessions()
         for name in sorted(sessions):
-            print(name + "\t" + sessions[name])
+            entry = sessions[name]
+            seconds = _stamp_seconds(entry.get("updated"))
+            age = None if seconds is None else _age_days(seconds)
+            print(name + "\t" + entry["url"] + "\t" + _format_age(age))
         if not sessions:
             print("(no saved sessions)")
         return 0
@@ -674,10 +847,25 @@ def main(argv=None):
         if sessions.pop(args.forget, None) is None:
             sys.stderr.write("no session named " + repr(args.forget) + "\n")
             return 1
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(SESSIONS, "w") as handle:
-            json.dump(sessions, handle, indent=2)
+        write_sessions(sessions)
         print("forgot " + args.forget)
+        return 0
+
+    if args.prune:
+        victims = prune_plan(days=None if args.prune_all else args.days)
+        if not victims:
+            print("nothing to prune")
+            return 0
+        for kind, name, age in victims:
+            print(kind + "\t" + name + "\t" + _format_age(age))
+        if not args.yes:
+            print("")
+            print("listed only - repeat with --yes to remove "
+                  + describe_prune(victims))
+            return 0
+        prune_apply(victims)
+        print("")
+        print("removed " + describe_prune(victims))
         return 0
 
     # --write is implement mode: it needs the command op, and its own preset

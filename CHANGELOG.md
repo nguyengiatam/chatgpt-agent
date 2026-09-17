@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.0
+
+**Both state stores now have a floor.** `~/.chatgpt-agent` was append-only in
+practice: `clear_run()` fires when a run ends cleanly, but a run killed
+mid-flight — a malformed `c2c` block, a closed lid, a Ctrl-C — left its
+checkpoint behind for good, and a session bookmark was never dropped at all. A
+few weeks of daily use on one project left six dead checkpoints, one of them
+28 KB because it carries the pending message, and 26 bookmarks that nothing
+would ever have removed.
+
+Every run now prunes what is older than 14 days before writing state of its own,
+and `--prune` does it on demand. It **lists by default** and deletes only with
+`--yes`: a checkpoint is exactly what `--resume` needs, and a bookmark is the
+only record of which conversation a session name points at. `--days <n>` moves
+the line, `--all` ignores age.
+
+Nothing in flight is swept. The plan holds back the run being checkpointed right
+now and the session it is using, so a `--resume` after a two-week gap still
+finds its checkpoint.
+
+**Session entries are records, not URL strings.** A bookmark is now
+`{"url": …, "updated": …}`, and reusing a session restamps it, so a conversation
+returned to every week never looks stale. Stores written by earlier versions are
+still read, and are dated from the file's own mtime — without a stamp from
+somewhere, an old bookmark could never age out. `--list-sessions` prints that
+age as a third column.
+
+New: `/chatgpt-agent:clean`.
+
+
+
 ## 0.4.0
 
 **Kiro CLI integration**, and **one version across every manifest**.

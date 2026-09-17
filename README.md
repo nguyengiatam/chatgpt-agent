@@ -179,9 +179,28 @@ refused by the runtime.
 | `--retries` | `3` | attempts per exchange before giving up |
 | `--resume` | off | continue the interrupted run for this session |
 | `--timeout` | `300` | seconds per reply |
+| `--list-sessions` | | print saved conversations with their age |
+| `--forget <name>` | | drop one saved conversation |
+| `--prune` | off | list dead checkpoints and stale sessions, then exit |
+| `--days` | `14` | age `--prune` calls stale |
+| `--all` | off | with `--prune`: everything, whatever its age |
+| `--yes` | off | with `--prune`: delete instead of listing |
 
-Sessions live in `~/.chatgpt-agent/sessions.json` as name → conversation URL.
-Without `--session`, every run starts a fresh chat and nothing is remembered.
+## State on disk
+
+Two stores live under `~/.chatgpt-agent`:
+
+- `sessions.json` — one record per session name, `{"url": …, "updated": …}`.
+  Without `--session`, every run starts a fresh chat and nothing is remembered.
+- `runs/<name>.json` — a checkpoint written before every wait, so a run killed
+  mid-flight can be picked up with `--resume` instead of thrown away.
+
+Neither used to be cleaned up: `clear_run()` only fires when a run ends
+cleanly, so every interrupted run left a checkpoint behind for good, and
+bookmarks were never dropped at all. Each run now prunes whatever is older than
+14 days before it writes its own state, and `--prune` does it on demand —
+listing by default, deleting only with `--yes`. Whatever the current run needs
+is held back, so a `--resume` is never the thing swept.
 
 ## One run at a time
 

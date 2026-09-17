@@ -215,3 +215,11 @@ already has a reply — if it does, the run continues from there without
 re-sending it. Runs are checkpointed under their `--session` name, or under
 `_last` when none was given, in `~/.chatgpt-agent/runs/`.
 
+A checkpoint is removed when its run ends, which means a run that never ends —
+killed, crashed, given up on — leaves one behind. Every run therefore prunes
+checkpoints and session bookmarks older than `STATE_TTL_DAYS` (14) before
+writing its own, and `--prune` exposes the same plan on demand: `prune_plan()`
+lists, `prune_apply()` deletes, and the CLI only calls the second one with
+`--yes`. Both hold back the name the current run is using, so housekeeping can
+never sweep the checkpoint a `--resume` is about to read.
+

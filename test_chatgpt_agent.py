@@ -2,13 +2,16 @@
 """Tests for the orchestrator's pure parts (no browser)."""
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -221,12 +224,16 @@ class SessionStoreTest(unittest.TestCase):
         agent.STATE_DIR, agent.SESSIONS = self._saved
         shutil.rmtree(self.dir, ignore_errors=True)
 
+    def _write_raw(self, raw):
+        with open(agent.SESSIONS, "w") as handle:
+            json.dump(raw, handle)
+
     def test_missing_store_reads_as_empty(self):
         self.assertEqual(agent.load_sessions(), {})
 
     def test_a_saved_session_round_trips(self):
         agent.save_session("app", "https://chatgpt.com/c/abc")
-        self.assertEqual(agent.load_sessions()["app"], "https://chatgpt.com/c/abc")
+        self.assertEqual(agent.session_url("app"), "https://chatgpt.com/c/abc")
 
     def test_saving_keeps_other_sessions(self):
         agent.save_session("one", "https://chatgpt.com/c/1")
@@ -237,6 +244,39 @@ class SessionStoreTest(unittest.TestCase):
         with open(agent.SESSIONS, "w") as handle:
             handle.write("{ not json")
         self.assertEqual(agent.load_sessions(), {})
+
+    def test_an_absent_session_has_no_url(self):
+        self.assertIsNone(agent.session_url("never-saved"))
+
+    def test_saving_stamps_the_time_so_the_bookmark_can_age(self):
+        agent.save_session("app", "https://chatgpt.com/c/abc")
+        self.assertIsNotNone(agent.load_sessions()["app"]["updated"])
+
+    def test_a_legacy_url_string_still_resolves(self):
+        self._write_raw({"old": "https://chatgpt.com/c/old"})
+        self.assertEqual(agent.session_url("old"), "https://chatgpt.com/c/old")
+
+    def test_a_legacy_entry_is_dated_from_the_file_so_it_can_age_out(self):
+        self._write_raw({"old": "https://chatgpt.com/c/old"})
+        old = time.time() - 30 * 86400
+        os.utime(agent.SESSIONS, (old, old))
+        stamp = agent.load_sessions()["old"]["updated"]
+        self.assertGreater(agent._age_days(agent._stamp_seconds(stamp)), 29)
+
+    def test_reusing_a_session_refreshes_its_stamp(self):
+        self._write_raw({"app": {"url": "https://chatgpt.com/c/abc",
+                                 "updated": "2020-01-01T00:00:00Z"}})
+        agent.touch_session("app")
+        stamp = agent.load_sessions()["app"]["updated"]
+        self.assertLess(agent._age_days(agent._stamp_seconds(stamp)), 1)
+
+    def test_touching_an_absent_session_saves_nothing(self):
+        agent.touch_session("never-saved")
+        self.assertEqual(agent.load_sessions(), {})
+
+    def test_an_entry_that_is_not_a_bookmark_is_dropped(self):
+        self._write_raw({"junk": 5, "app": "https://chatgpt.com/c/abc"})
+        self.assertEqual(sorted(agent.load_sessions()), ["app"])
 
 
 class RunStateTest(unittest.TestCase):
@@ -279,6 +319,162 @@ class RunStateTest(unittest.TestCase):
         with open(os.path.join(agent.RUNS_DIR, "bad.json"), "w") as handle:
             handle.write("{ truncated")
         self.assertIsNone(agent.load_run("bad"))
+
+
+class PruneTest(unittest.TestCase):
+    """Neither store used to drop anything, so both grew for as long as the tool
+    was used. Pruning is what bounds them - without deleting a checkpoint that a
+    run is still depending on."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._saved = (agent.STATE_DIR, agent.SESSIONS, agent.RUNS_DIR)
+        agent.STATE_DIR = self.dir
+        agent.SESSIONS = os.path.join(self.dir, "sessions.json")
+        agent.RUNS_DIR = os.path.join(self.dir, "runs")
+
+    def tearDown(self):
+        agent.STATE_DIR, agent.SESSIONS, agent.RUNS_DIR = self._saved
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _run_aged(self, name, days):
+        agent.save_run(name, {"round": 1})
+        when = time.time() - days * 86400
+        os.utime(agent._run_path(name), (when, when))
+
+    def _session_aged(self, name, days):
+        sessions = agent.load_sessions()
+        sessions[name] = {
+            "url": "https://chatgpt.com/c/" + name,
+            "updated": agent._stamp_from_epoch(time.time() - days * 86400),
+        }
+        agent.write_sessions(sessions)
+
+    def _names(self, victims, kind):
+        return sorted(name for a_kind, name, _ in victims if a_kind == kind)
+
+    def test_a_checkpoint_past_the_ttl_is_listed(self):
+        self._run_aged("dead", 30)
+        self.assertEqual(self._names(agent.prune_plan(days=14), "run"), ["dead"])
+
+    def test_a_fresh_checkpoint_is_left_alone(self):
+        self._run_aged("today", 0)
+        self.assertEqual(agent.prune_plan(days=14), [])
+
+    def test_the_run_in_flight_is_never_listed(self):
+        self._run_aged("app", 30)
+        self.assertEqual(agent.prune_plan(days=14, keep=("app",)), [])
+
+    def test_a_session_past_the_ttl_is_listed(self):
+        self._session_aged("old", 30)
+        self.assertEqual(self._names(agent.prune_plan(days=14), "session"), ["old"])
+
+    def test_a_fresh_session_is_left_alone(self):
+        self._session_aged("today", 1)
+        self.assertEqual(agent.prune_plan(days=14), [])
+
+    def test_the_session_in_flight_is_never_listed(self):
+        self._session_aged("app", 30)
+        self.assertEqual(agent.prune_plan(days=14, keep=("app",)), [])
+
+    def test_planning_deletes_nothing(self):
+        self._run_aged("dead", 30)
+        self._session_aged("old", 30)
+        agent.prune_plan(days=14)
+        self.assertIsNotNone(agent.load_run("dead"))
+        self.assertIsNotNone(agent.session_url("old"))
+
+    def test_applying_removes_both_kinds(self):
+        self._run_aged("dead", 30)
+        self._session_aged("old", 30)
+        agent.prune_apply(agent.prune_plan(days=14))
+        self.assertIsNone(agent.load_run("dead"))
+        self.assertIsNone(agent.session_url("old"))
+
+    def test_applying_keeps_what_it_was_not_given(self):
+        self._run_aged("dead", 30)
+        self._run_aged("today", 0)
+        self._session_aged("old", 30)
+        self._session_aged("recent", 1)
+        agent.prune_apply(agent.prune_plan(days=14))
+        self.assertIsNotNone(agent.load_run("today"))
+        self.assertEqual(sorted(agent.load_sessions()), ["recent"])
+
+    def test_no_age_limit_takes_everything_not_kept(self):
+        self._run_aged("today", 0)
+        self._session_aged("today", 0)
+        victims = agent.prune_plan(days=None)
+        self.assertEqual(self._names(victims, "run"), ["today"])
+        self.assertEqual(self._names(victims, "session"), ["today"])
+
+    def test_an_unreadable_stamp_survives_a_ttl_prune(self):
+        agent.write_sessions({"weird": {"url": "https://chatgpt.com/c/w",
+                                        "updated": "whenever"}})
+        self.assertEqual(agent.prune_plan(days=14), [])
+        self.assertEqual(self._names(agent.prune_plan(days=None), "session"), ["weird"])
+
+    def test_a_stray_file_in_the_runs_directory_is_ignored(self):
+        os.makedirs(agent.RUNS_DIR, exist_ok=True)
+        with open(os.path.join(agent.RUNS_DIR, "notes.txt"), "w") as handle:
+            handle.write("x")
+        self.assertEqual(agent.prune_plan(days=None), [])
+
+    def test_an_empty_state_directory_prunes_nothing(self):
+        self.assertEqual(agent.prune_plan(days=14), [])
+
+
+class PruneCommandTest(unittest.TestCase):
+    """--prune lists by default; deleting takes --yes. A cleanup that removes
+    things before the operator has seen the list is how a resume gets lost."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._saved = (agent.STATE_DIR, agent.SESSIONS, agent.RUNS_DIR)
+        agent.STATE_DIR = self.dir
+        agent.SESSIONS = os.path.join(self.dir, "sessions.json")
+        agent.RUNS_DIR = os.path.join(self.dir, "runs")
+        agent.save_run("dead", {"round": 1})
+        when = time.time() - 30 * 86400
+        os.utime(agent._run_path("dead"), (when, when))
+
+    def tearDown(self):
+        agent.STATE_DIR, agent.SESSIONS, agent.RUNS_DIR = self._saved
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _main(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = agent.main(list(argv))
+        return code, out.getvalue()
+
+    def test_listing_names_the_checkpoint_and_removes_nothing(self):
+        code, out = self._main("--prune")
+        self.assertEqual(code, 0)
+        self.assertIn("dead", out)
+        self.assertIsNotNone(agent.load_run("dead"))
+
+    def test_listing_says_how_to_go_through_with_it(self):
+        _, out = self._main("--prune")
+        self.assertIn("--yes", out)
+
+    def test_yes_removes_it(self):
+        code, out = self._main("--prune", "--yes")
+        self.assertEqual(code, 0)
+        self.assertIsNone(agent.load_run("dead"))
+
+    def test_a_shorter_ttl_can_be_asked_for(self):
+        agent.save_run("today", {"round": 1})
+        _, out = self._main("--prune", "--days", "0")
+        self.assertIn("today", out)
+
+    def test_nothing_to_prune_says_so(self):
+        agent.clear_run("dead")
+        _, out = self._main("--prune")
+        self.assertIn("nothing to prune", out)
+
+    def test_pruning_needs_no_task(self):
+        code, _ = self._main("--prune")
+        self.assertEqual(code, 0)
 
 
 class AttemptTest(unittest.TestCase):
@@ -489,6 +685,67 @@ class EmptyAnswerTest(unittest.TestCase):
 
     def test_a_real_answer_is_still_returned_untouched(self):
         self.assertEqual(self._run(["GO - nothing found."]), "GO - nothing found.")
+
+class HousekeepingTest(unittest.TestCase):
+    """Pruning has to happen on the way past a real run - a cleanup nobody ever
+    calls is the state of affairs this replaced."""
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self._runs, agent.RUNS_DIR = agent.RUNS_DIR, os.path.join(self.dir, "runs")
+        self._state, agent.STATE_DIR = agent.STATE_DIR, self.dir
+        self._sessions, agent.SESSIONS = agent.SESSIONS, os.path.join(self.dir, "sessions.json")
+        self._cgpt, self._ops, self._goto = agent.cgpt, agent.ops, agent.goto
+        agent.ops = _FakeOps()
+        agent.goto = lambda *a, **k: None
+        agent.cgpt = _FakeCgpt(["GO - nothing found."])
+
+    def tearDown(self):
+        agent.RUNS_DIR, agent.STATE_DIR, agent.SESSIONS = self._runs, self._state, self._sessions
+        agent.cgpt, agent.ops, agent.goto = self._cgpt, self._ops, self._goto
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _aged_run(self, name, days):
+        agent.save_run(name, {"round": 1})
+        when = time.time() - days * 86400
+        os.utime(agent._run_path(name), (when, when))
+
+    def _run(self):
+        self.lines = []
+        args = argparse.Namespace(
+            workspace=self.dir, preset="review", task="t", session=None, new=True,
+            resume=False, write=False, allow_shell=False, focus=False,
+            max_rounds=10, max_chars=1000, round_chars=500, timeout=1, poll=0,
+            retries=1,
+        )
+        return agent.run(args, self.lines.append, {})
+
+    def test_a_run_drops_a_dead_checkpoint_on_its_way_past(self):
+        self._aged_run("zombie", 30)
+        self._run()
+        self.assertIsNone(agent.load_run("zombie"))
+
+    def test_it_says_what_it_pruned(self):
+        self._aged_run("zombie", 30)
+        self._run()
+        self.assertIn("pruned", "\n".join(self.lines))
+
+    def test_a_fresh_checkpoint_survives_a_run(self):
+        self._aged_run("yesterday", 1)
+        self._run()
+        self.assertIsNotNone(agent.load_run("yesterday"))
+
+    def test_a_stale_bookmark_is_dropped_too(self):
+        agent.write_sessions({"old": {"url": "https://chatgpt.com/c/old",
+                                      "updated": agent._stamp_from_epoch(
+                                          time.time() - 30 * 86400)}})
+        self._run()
+        self.assertIsNone(agent.session_url("old"))
+
+    def test_a_clean_store_is_pruned_silently(self):
+        self._run()
+        self.assertNotIn("pruned", "\n".join(self.lines))
+
 
 if __name__ == "__main__":
     unittest.main()

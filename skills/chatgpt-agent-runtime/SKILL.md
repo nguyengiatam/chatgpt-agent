@@ -37,9 +37,24 @@ python3 "${CLAUDE_PLUGIN_ROOT}/chatgpt-agent.py" --preset review [flags] "<task>
 | `--resume` | off | continue this session's interrupted run |
 | `--timeout` | `300` | seconds to wait for one reply |
 | `--list-sessions` / `--forget <name>` | | manage saved conversations |
+| `--prune` | off | list dead checkpoints and stale sessions, then exit |
+| `--days` / `--all` / `--yes` | `14` / off / off | with `--prune`: the age line, ignore age, actually delete |
 
 A run normally takes one to three minutes across three or four exchanges.
 Progress goes to stderr, the answer to stdout.
+
+## State, and what clears it
+
+`~/.chatgpt-agent/sessions.json` holds one record per session name
+(`{"url", "updated"}`), and `~/.chatgpt-agent/runs/<name>.json` holds the
+checkpoint `--resume` reads. Every run prunes both of whatever is older than 14
+days before writing its own state; `--prune` does it on demand and **lists by
+default**, deleting only with `--yes`. Never pass `--yes` on your own
+initiative — a checkpoint is what an interrupted run resumes from, and a
+bookmark is the only record of which conversation a name points at.
+
+A run being checkpointed and the session it is using are held out of every
+prune, so housekeeping cannot sweep the run in flight.
 
 ## Prerequisites, all mandatory
 

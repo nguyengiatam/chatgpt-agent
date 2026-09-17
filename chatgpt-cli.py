@@ -185,20 +185,67 @@ def eval_js(tab_id, expression):
         raise CliError("Unexpected reply from the page: " + raw[:200])
 
 
-def ensure_tab(timeout):
-    """Find the open ChatGPT tab, or open one and wait for it to load."""
-    found = find_chatgpt_tab(parse_tabs(bridge("list")))
-    if found:
-        return found
-
-    tab_id = int(bridge("open", CHATGPT_URL))
+def open_tab(url, timeout):
+    """Open `url` in a new Edge tab and return its stable id once loaded."""
+    tab_id = int(bridge("open", url))
     deadline = time.time() + timeout
     while time.time() < deadline:
         if bridge("loading", tab_id) == "done":
             return tab_id
         time.sleep(0.5)
     return tab_id
-    raise CliError("Opened " + CHATGPT_URL + " but it did not finish loading in time.")
+
+
+def ensure_tab(timeout):
+    """Find the open ChatGPT tab, or open one and wait for it to load."""
+    found = find_chatgpt_tab(parse_tabs(bridge("list")))
+    if found:
+        return found
+    return open_tab(CHATGPT_URL, timeout)
+
+
+def claim_one_shot_tab(held, timeout):
+    """Claim an available ChatGPT tab and the conversation it currently shows."""
+    first = ensure_tab(timeout)
+
+    def claim_candidate(tab_id, known_url=None):
+        try:
+            held.claim_tab(tab_id)
+        except claims.ClaimBusy:
+            return False
+        try:
+            url = known_url
+            if url is None:
+                value = eval_js(tab_id, "location.href")
+                url = value if isinstance(value, str) else None
+            held.claim_conversation(claims.conversation_id(url))
+        except claims.ClaimBusy:
+            # A busy tab is replaceable; an already-owned conversation is not.
+            # Release the tab we just took, then preserve the holder diagnostic.
+            held.release_tab(tab_id)
+            raise
+        return True
+
+    # Keep the common path cheap: if the first reusable tab is free, no second
+    # bridge listing is needed. Only contention makes us enumerate alternatives.
+    if claim_candidate(first):
+        return first
+
+    for _window, _index, tab_id, url in parse_tabs(bridge("list")):
+        if tab_id == first:
+            continue
+        try:
+            host = urlsplit(url).hostname
+        except ValueError:
+            continue
+        if not host or host.lower() not in CHATGPT_HOSTS:
+            continue
+        if claim_candidate(tab_id, url):
+            return tab_id
+
+    tab_id = open_tab(CHATGPT_URL, timeout)
+    held.claim_tab(tab_id)
+    return tab_id
 
 
 def make_marker():
@@ -436,17 +483,14 @@ def main(argv=None):
         parser.error("no prompt given")
 
     try:
-        tab_id = ensure_tab(args.timeout)
-        # This tab is shared: a long agent run may be working in it right now.
-        # Claiming it, and the conversation it shows, is what stops one answer
-        # from being read as the other's.
+        # A one-shot may use any free ChatGPT tab. A busy first candidate is not
+        # a reason to fail when another tab (or a fresh one) can isolate the ask.
         held = claims.ClaimSet("ask")
         atexit.register(held.close)
-        held.claim_tab(tab_id)
+        tab_id = claim_one_shot_tab(held, args.timeout)
         if args.focus:
             bridge("focus", tab_id)
 
-        held.claim_conversation(claims.conversation_id(eval_js(tab_id, "location.href")))
         status = eval_js(tab_id, "CGPT.probe()")
         if not status.get("ok"):
             raise CliError(
@@ -455,6 +499,11 @@ def main(argv=None):
             )
 
         marker = send(tab_id, prompt)
+        # A fresh chat receives its durable /c/<id> only after the first turn is
+        # accepted. Claim that identity before waiting so another process cannot
+        # attach to the same conversation during the answer window.
+        current_url = eval_js(tab_id, "location.href")
+        held.claim_conversation(claims.conversation_id(current_url))
         reply = wait_for_reply(tab_id, marker, args.timeout, args.poll)
     except claims.ClaimBusy as exc:
         sys.stderr.write(str(exc) + "\n")

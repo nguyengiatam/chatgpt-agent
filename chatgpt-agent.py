@@ -278,6 +278,8 @@ def load_sessions():
         elif isinstance(entry, dict) and isinstance(entry.get("url"), str):
             sessions[name] = {"url": entry["url"],
                               "updated": entry.get("updated") or fallback}
+            if isinstance(entry.get("tab_id"), int):
+                sessions[name]["tab_id"] = entry["tab_id"]
     return sessions
 
 
@@ -345,9 +347,12 @@ def mutate_sessions(change):
         write_sessions(sessions)
 
 
-def save_session(name, url):
+def save_session(name, url, tab_id=None):
     def change(sessions):
-        sessions[name] = {"url": url, "updated": _now_stamp()}
+        entry = {"url": url, "updated": _now_stamp()}
+        if tab_id is not None:
+            entry["tab_id"] = int(tab_id)
+        sessions[name] = entry
     mutate_sessions(change)
 
 
@@ -542,6 +547,45 @@ def workspace_facts(root):
 # --- browser ---------------------------------------------------------------
 
 
+def _same_conversation(left, right):
+    """True when two URLs name the same ChatGPT conversation."""
+    left_id = claims.conversation_id(left)
+    right_id = claims.conversation_id(right)
+    if left_id and right_id:
+        return left_id == right_id
+    return left == right
+
+
+def resolve_session_tab(entry, timeout):
+    """Return a binding only if its tab still shows this exact conversation.
+
+    A surviving tab id is insufficient: the user can drive that tab to another
+    conversation while every host/existence check still passes. Unknown or stale
+    bindings are reopened from the durable conversation URL instead.
+    """
+    url = entry["url"]
+    bound = entry.get("tab_id")
+    if isinstance(bound, int):
+        for _window, _index, tab_id, current_url in cgpt.parse_tabs(cgpt.bridge("list")):
+            if tab_id == bound and _same_conversation(current_url, url):
+                return bound
+    return cgpt.open_tab(url, timeout)
+
+
+def _rebind_after_tab_gone(tab_id, url, held, args, log):
+    """Reopen one vanished tab while retaining the conversation claim."""
+    replacement = cgpt.open_tab(url, args.timeout)
+    held.release_tab(tab_id)
+    held.claim_tab(replacement)
+    goto(replacement, url, args.timeout)
+    if args.focus:
+        cgpt.bridge("focus", replacement)
+    if args.session:
+        save_session(args.session, url, replacement)
+    log("  tab disappeared - reopened conversation as tab " + str(replacement))
+    return replacement
+
+
 def goto(tab_id, url, timeout):
     """Point the tab at `url` and wait until the composer is usable again."""
     cgpt.bridge("eval", "location.href=" + json.dumps(url) + ";''", tab_id)
@@ -569,6 +613,10 @@ def attempt(label, tries, log, action):
     for number in range(1, tries + 1):
         try:
             return action()
+        except cgpt.TabGone:
+            # Retrying the same stable id cannot revive a closed tab. More
+            # importantly, retrying send here could duplicate an accepted turn.
+            raise
         except cgpt.CliError as exc:
             if number >= tries:
                 raise
@@ -585,9 +633,49 @@ def recover_reply(tab_id, marker, poll, log):
         reply = cgpt.wait_for_reply(tab_id, marker, RECOVER_TIMEOUT, poll)
         log("  found it - continuing without re-sending")
         return reply
+    except cgpt.TabGone:
+        raise
     except cgpt.CliError:
         log("  none found - re-sending that message")
         return None
+
+
+def wait_with_tab_recovery(tab_id, marker, url, held, args, recovery, log,
+                           first_timeout=None, missing_ok=False):
+    """Wait for one accepted marker, reopening its conversation at most once."""
+    timeout = args.timeout if first_timeout is None else first_timeout
+    try:
+        reply = attempt("wait", args.retries, log,
+                        lambda: cgpt.wait_for_reply(tab_id, marker, timeout, args.poll))
+        return reply, tab_id
+    except cgpt.TabGone:
+        if recovery.get("used"):
+            raise cgpt.CliError(
+                "The ChatGPT tab disappeared a second time during this run. "
+                "The conversation is " + str(url or "unknown")
+            )
+        if not url:
+            raise cgpt.CliError(
+                "The ChatGPT tab disappeared after a round was sent, and its "
+                "conversation URL is unknown. Recovery cannot safely re-send it."
+            )
+        tab_id = _rebind_after_tab_gone(tab_id, url, held, args, log)
+        recovery["used"] = True
+        try:
+            reply = attempt("recover wait", args.retries, log,
+                            lambda: cgpt.wait_for_reply(
+                                tab_id, marker, args.timeout, args.poll))
+        except cgpt.TabGone:
+            raise cgpt.CliError(
+                "The ChatGPT tab disappeared a second time during this run. "
+                "The conversation is " + url
+            )
+        return reply, tab_id
+    except cgpt.CliError:
+        if missing_ok:
+            log("  none found - re-sending that message")
+            return None, tab_id
+        raise
 
 
 # --- the loop --------------------------------------------------------------
@@ -660,16 +748,9 @@ def run(args, log, progress):
         log("pruned " + describe_prune(dropped) + " older than "
             + str(STATE_TTL_DAYS) + " days")
 
-    tab_id = cgpt.ensure_tab(args.timeout)
-    # Held for the run, not around each call: the gap between two rounds is
-    # long enough for another run to take the tab mid-task. Nothing releases
-    # these by hand - the kernel drops them when this process ends, however it
-    # ends, which is what keeps a killed run from stranding a conversation.
     held = claims.ClaimSet(name)
     atexit.register(held.close)
-    held.claim_tab(tab_id)
-    if args.focus:
-        cgpt.bridge("focus", tab_id)
+    recovery = {"used": False}
 
     if args.resume:
         state = load_run(name)
@@ -686,12 +767,32 @@ def run(args, log, progress):
         progress["url"] = state.get("url")
         log("resuming " + repr(name) + " at round " + str(first_round))
         held.claim_conversation(claims.conversation_id(state["url"]))
+        entry = load_sessions().get(args.session) if args.session else None
+        if not entry or not _same_conversation(entry.get("url"), state["url"]):
+            entry = {"url": state["url"]}
+        tab_id = resolve_session_tab(entry, args.timeout)
+        held.claim_tab(tab_id)
+        if args.focus:
+            cgpt.bridge("focus", tab_id)
         goto(tab_id, state["url"], args.timeout)
-        reply = recover_reply(tab_id, state.get("marker"), args.poll, log)
+        if args.session:
+            save_session(args.session, state["url"], tab_id)
+        marker = state.get("marker")
+        if marker:
+            log("  checking whether the interrupted message already has a reply")
+            reply, tab_id = wait_with_tab_recovery(
+                tab_id, marker, state["url"], held, args, recovery, log,
+                first_timeout=RECOVER_TIMEOUT, missing_ok=True)
+            if reply is not None:
+                log("  found it - continuing without re-sending")
+        else:
+            reply = None
     else:
         root = workspace_root(args.workspace)
         preset = load_preset(args.preset)
-        saved = session_url(args.session) if (args.session and not args.new) else None
+        saved_entry = (load_sessions().get(args.session)
+                       if (args.session and not args.new) else None)
+        saved = saved_entry.get("url") if saved_entry else None
         if saved:
             touch_session(args.session)
         facts = workspace_facts(root)
@@ -701,8 +802,25 @@ def run(args, log, progress):
         for fact in facts:
             log("  " + fact)
         log("conversation: " + (saved or "new chat"))
-        held.claim_conversation(claims.conversation_id(saved))
-        goto(tab_id, saved or NEW_CHAT_URL, args.timeout)
+
+        if saved:
+            progress["url"] = saved
+            held.claim_conversation(claims.conversation_id(saved))
+            tab_id = resolve_session_tab(saved_entry, args.timeout)
+            held.claim_tab(tab_id)
+            goto(tab_id, saved, args.timeout)
+            save_session(args.session, saved, tab_id)
+        elif args.session:
+            tab_id = cgpt.open_tab(NEW_CHAT_URL, args.timeout)
+            held.claim_tab(tab_id)
+            goto(tab_id, NEW_CHAT_URL, args.timeout)
+        else:
+            tab_id = cgpt.ensure_tab(args.timeout)
+            held.claim_tab(tab_id)
+            goto(tab_id, NEW_CHAT_URL, args.timeout)
+
+        if args.focus:
+            cgpt.bridge("focus", tab_id)
         message = opening_message(preset, root, args.task, args.allow_shell,
                                   write=args.write, facts=facts)
         first_round, reply = 1, None
@@ -720,14 +838,32 @@ def run(args, log, progress):
                     "type - sending as an attachment, which stays in the conversation")
             marker = attempt("send", args.retries, log,
                              lambda: cgpt.send(tab_id, message))
+
+            # A new chat gains its durable /c/<id> URL when the first turn lands.
+            # Capture it before waiting so a vanished tab can be reopened without
+            # guessing which conversation accepted the already-sent round.
+            if not progress.get("url"):
+                try:
+                    current_url = cgpt.eval_js(tab_id, "location.href")
+                except cgpt.TabGone:
+                    raise cgpt.CliError(
+                        "The tab disappeared after the round was sent but before its "
+                        "conversation URL could be recorded. Re-sending could duplicate "
+                        "the round, so recovery stops here."
+                    )
+                if isinstance(current_url, str) and "/c/" in current_url:
+                    progress["url"] = current_url
+                    held.claim_conversation(claims.conversation_id(current_url))
+                    if args.session:
+                        save_session(args.session, current_url, tab_id)
+
             # Checkpoint before waiting: this is the window a crash lands in.
             save_run(name, {
                 "url": progress.get("url"), "root": root, "round": round_number,
                 "spent": budget.spent, "pending_message": message, "marker": marker,
             })
-            reply = attempt("wait", args.retries, log,
-                            lambda: cgpt.wait_for_reply(
-                                tab_id, marker, args.timeout, args.poll))
+            reply, tab_id = wait_with_tab_recovery(
+                tab_id, marker, progress.get("url"), held, args, recovery, log)
 
         if not progress.get("url"):
             url = cgpt.eval_js(tab_id, "location.href")
@@ -736,7 +872,7 @@ def run(args, log, progress):
                 held.claim_conversation(claims.conversation_id(url))
                 log("conversation: " + url)
                 if args.session:
-                    save_session(args.session, url)
+                    save_session(args.session, url, tab_id)
 
         try:
             requested = proto.extract_ops(reply)
@@ -823,8 +959,8 @@ def run(args, log, progress):
         # whole run stays in the worktree and dies with the session.
         log("round budget spent - offering a landing round to commit")
         marker = attempt("send", args.retries, log, lambda: cgpt.send(tab_id, LANDING_ROUND))
-        reply = attempt("wait", args.retries, log,
-                        lambda: cgpt.wait_for_reply(tab_id, marker, args.timeout, args.poll))
+        reply, tab_id = wait_with_tab_recovery(
+            tab_id, marker, progress.get("url"), held, args, recovery, log)
         try:
             requested = proto.extract_ops(reply)
         except proto.ProtocolError:
@@ -841,15 +977,15 @@ def run(args, log, progress):
                 results.append(result)
             marker = attempt("send", args.retries, log, lambda: cgpt.send(
                 tab_id, proto.format_results(results) + "\n\n" + LANDED))
-            reply = attempt("wait", args.retries, log,
-                            lambda: cgpt.wait_for_reply(tab_id, marker, args.timeout, args.poll))
+            reply, tab_id = wait_with_tab_recovery(
+                tab_id, marker, progress.get("url"), held, args, recovery, log)
         clear_run(name)
         return reply
 
     log("round budget spent - asking for a conclusion")
     marker = attempt("send", args.retries, log, lambda: cgpt.send(tab_id, BUDGET_SPENT))
-    answer = attempt("wait", args.retries, log,
-                     lambda: cgpt.wait_for_reply(tab_id, marker, args.timeout, args.poll))
+    answer, tab_id = wait_with_tab_recovery(
+        tab_id, marker, progress.get("url"), held, args, recovery, log)
     clear_run(name)
     return answer
 
@@ -934,19 +1070,31 @@ def main(argv=None):
 
     if args.prune:
         victims = prune_plan(days=None if args.prune_all else args.days)
-        if not victims:
+        abandoned_claims = claims.list_unheld_claims()
+        if not victims and not abandoned_claims:
             print("nothing to prune")
             return 0
         for kind, name, age in victims:
             print(kind + "\t" + name + "\t" + _format_age(age))
+        for name in abandoned_claims:
+            print("claim\t" + name + "\tunheld")
         if not args.yes:
             print("")
-            print("listed only - repeat with --yes to remove "
-                  + describe_prune(victims))
+            summary = describe_prune(victims) if victims else ""
+            if abandoned_claims:
+                summary += (", " if summary else "") + str(len(abandoned_claims)) + " abandoned claim"
+                if len(abandoned_claims) != 1:
+                    summary += "s"
+            print("listed only - repeat with --yes to remove " + summary)
             return 0
         prune_apply(victims)
+        removed_claims = claims.prune_unheld_claims()
         print("")
-        print("removed " + describe_prune(victims))
+        if victims:
+            print("removed " + describe_prune(victims))
+        if removed_claims:
+            print("removed " + str(len(removed_claims)) + " abandoned claim"
+                  + ("" if len(removed_claims) == 1 else "s"))
         return 0
 
     # --write is implement mode: it needs the command op, and its own preset

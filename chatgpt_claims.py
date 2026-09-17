@@ -133,6 +133,15 @@ class ClaimSet:
         if identity:
             self._keys.append(_acquire("conversation", str(identity), self.owner))
 
+    def release_tab(self, tab_id):
+        """Release this run's claim on one vanished tab while keeping the rest."""
+        key = ("tab", str(int(tab_id)))
+        for index in range(len(self._keys) - 1, -1, -1):
+            if self._keys[index] == key:
+                self._keys.pop(index)
+                _release(key)
+                return
+
     def close(self):
         for key in reversed(self._keys):
             _release(key)
@@ -144,3 +153,47 @@ class ClaimSet:
     def __exit__(self, exc_type, exc, tb):
         self.close()
         return False
+
+
+
+def _unheld_claims(remove):
+    """Claim files the kernel says nobody holds; optionally unlink them safely."""
+    try:
+        names = sorted(name for name in os.listdir(CLAIM_DIR) if name.endswith(".lock"))
+    except OSError:
+        return []
+    available = []
+    for name in names:
+        path = os.path.join(CLAIM_DIR, name)
+        try:
+            handle = open(path, "a+", encoding="utf-8")
+        except OSError:
+            continue
+        locked = False
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except BlockingIOError:
+                continue
+            available.append(name)
+            if remove:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    available.pop()
+        finally:
+            if locked:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+    return available
+
+
+def list_unheld_claims():
+    """Return abandoned claim filenames without deleting them."""
+    return _unheld_claims(False)
+
+
+def prune_unheld_claims():
+    """Remove abandoned claim files, rechecking the kernel lock at deletion time."""
+    return _unheld_claims(True)

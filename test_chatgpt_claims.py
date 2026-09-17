@@ -173,5 +173,62 @@ class SessionStoreConcurrencyTest(unittest.TestCase):
         self.assertEqual(sorted(stored), ["session-%02d" % i for i in range(12)])
 
 
+class ClaimSetApiTest(unittest.TestCase):
+    def test_claim_set_remains_a_context_manager(self):
+        claim_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(claim_dir.cleanup)
+        old = claims.CLAIM_DIR
+        claims.CLAIM_DIR = claim_dir.name
+        try:
+            with claims.ClaimSet("ctx") as held:
+                held.claim_tab(303)
+            contender = claims.ClaimSet("after")
+            contender.claim_tab(303)
+            contender.close()
+        finally:
+            claims.CLAIM_DIR = old
+
+
+class ClaimPruneTest(unittest.TestCase):
+    def test_prune_removes_unheld_claim_and_keeps_held_claim(self):
+        claim_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(claim_dir.cleanup)
+        env = os.environ.copy()
+        env["CHATGPT_AGENT_CLAIM_DIR"] = claim_dir.name
+
+        holder = self._holder(env, 202)
+        try:
+            stale = subprocess.run(
+                [sys.executable, "-c",
+                 "import chatgpt_claims as c; h=c.ClaimSet('stale'); h.claim_tab(101); h.close()"],
+                cwd=HERE, env=env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(stale.returncode, 0, stale.stderr)
+
+            pruner = subprocess.run(
+                [sys.executable, "-c",
+                 "import json, chatgpt_claims as c; print(json.dumps(c.prune_unheld_claims()))"],
+                cwd=HERE, env=env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(pruner.returncode, 0, pruner.stderr)
+            removed = json.loads(pruner.stdout)
+            self.assertEqual(len(removed), 1)
+            self.assertTrue(removed[0].startswith("tab-"))
+            self.assertEqual(len(os.listdir(claim_dir.name)), 1)
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+
+    def _holder(self, env, tab):
+        code = (
+            "import time, chatgpt_claims as c\n"
+            "h=c.ClaimSet('live'); h.claim_tab(" + str(tab) + ")\n"
+            "print('ready', flush=True); time.sleep(60)\n"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", code], cwd=HERE, env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(proc.stdout.readline().strip(), "ready",
+                         proc.stderr.read() if proc.poll() is not None else "")
+        return proc
+
+
 if __name__ == "__main__":
     unittest.main()

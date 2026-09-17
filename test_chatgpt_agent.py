@@ -235,6 +235,12 @@ class SessionStoreTest(unittest.TestCase):
         agent.save_session("app", "https://chatgpt.com/c/abc")
         self.assertEqual(agent.session_url("app"), "https://chatgpt.com/c/abc")
 
+    def test_a_saved_session_keeps_its_tab_binding(self):
+        self._write_raw({"app": {"url": "https://chatgpt.com/c/abc",
+                                 "tab_id": 707,
+                                 "updated": "2026-09-17T00:00:00Z"}})
+        self.assertEqual(agent.load_sessions()["app"]["tab_id"], 707)
+
     def test_saving_keeps_other_sessions(self):
         agent.save_session("one", "https://chatgpt.com/c/1")
         agent.save_session("two", "https://chatgpt.com/c/2")
@@ -429,16 +435,17 @@ class PruneCommandTest(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        self._saved = (agent.STATE_DIR, agent.SESSIONS, agent.RUNS_DIR)
+        self._saved = (agent.STATE_DIR, agent.SESSIONS, agent.RUNS_DIR, agent.claims.CLAIM_DIR)
         agent.STATE_DIR = self.dir
         agent.SESSIONS = os.path.join(self.dir, "sessions.json")
         agent.RUNS_DIR = os.path.join(self.dir, "runs")
+        agent.claims.CLAIM_DIR = os.path.join(self.dir, "claims")
         agent.save_run("dead", {"round": 1})
         when = time.time() - 30 * 86400
         os.utime(agent._run_path("dead"), (when, when))
 
     def tearDown(self):
-        agent.STATE_DIR, agent.SESSIONS, agent.RUNS_DIR = self._saved
+        agent.STATE_DIR, agent.SESSIONS, agent.RUNS_DIR, agent.claims.CLAIM_DIR = self._saved
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def _main(self, *argv):
@@ -864,3 +871,178 @@ class PageErrorReplyTest(unittest.TestCase):
             self._run(["Something went wrong.", "Network error",
                        "There was an error generating a response."])
         self.assertIn("page reported a failure", str(caught.exception))
+
+class SessionBindingSelectionTest(unittest.TestCase):
+    def setUp(self):
+        self._cgpt = agent.cgpt
+
+    def tearDown(self):
+        agent.cgpt = self._cgpt
+
+    def _browser(self, rows, opened=909):
+        class Browser:
+            def __init__(self):
+                self.opened = []
+            def bridge(self, *args):
+                if args[0] == "list":
+                    return rows
+                raise AssertionError(args)
+            def parse_tabs(self, raw):
+                return self._cgpt.parse_tabs(raw)
+            def open_tab(self, url, timeout):
+                self.opened.append((url, timeout))
+                return opened
+        browser = Browser()
+        browser._cgpt = self._cgpt
+        return browser
+
+    def test_binding_driven_to_another_conversation_is_reopened(self):
+        browser = self._browser("1\t1\t707\thttps://chatgpt.com/c/other")
+        agent.cgpt = browser
+        entry = {"url": "https://chatgpt.com/c/wanted", "tab_id": 707}
+        self.assertEqual(agent.resolve_session_tab(entry, 12), 909)
+        self.assertEqual(browser.opened, [("https://chatgpt.com/c/wanted", 12)])
+
+    def test_closed_binding_is_reopened_at_saved_conversation(self):
+        browser = self._browser("1\t1\t808\thttps://chatgpt.com/c/unrelated", opened=910)
+        agent.cgpt = browser
+        entry = {"url": "https://chatgpt.com/c/wanted", "tab_id": 707}
+        self.assertEqual(agent.resolve_session_tab(entry, 12), 910)
+        self.assertEqual(browser.opened[0][0], "https://chatgpt.com/c/wanted")
+
+    def test_legacy_session_without_tab_binding_reopens_its_conversation(self):
+        browser = self._browser("", opened=911)
+        agent.cgpt = browser
+        self.assertEqual(agent.resolve_session_tab({"url": "https://chatgpt.com/c/legacy"}, 12), 911)
+        self.assertEqual(browser.opened[0][0], "https://chatgpt.com/c/legacy")
+
+
+class TabGoneRecoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self.saved = (agent.STATE_DIR, agent.SESSIONS, agent.SESSIONS_LOCK, agent.RUNS_DIR,
+                      agent.cgpt, agent.goto, agent.claims.ClaimSet)
+        agent.STATE_DIR = self.dir
+        agent.SESSIONS = os.path.join(self.dir, "sessions.json")
+        agent.SESSIONS_LOCK = os.path.join(self.dir, "sessions.lock")
+        agent.RUNS_DIR = os.path.join(self.dir, "runs")
+        agent.goto = lambda *a, **k: None
+        self.events = []
+
+        outer = self
+        class RecordingClaims:
+            def __init__(self, owner):
+                outer.events.append(("new", owner))
+            def claim_tab(self, tab_id):
+                outer.events.append(("claim_tab", tab_id))
+            def release_tab(self, tab_id):
+                outer.events.append(("release_tab", tab_id))
+            def claim_conversation(self, identity):
+                outer.events.append(("claim_conversation", identity))
+            def close(self):
+                pass
+        agent.claims.ClaimSet = RecordingClaims
+
+    def tearDown(self):
+        (agent.STATE_DIR, agent.SESSIONS, agent.SESSIONS_LOCK, agent.RUNS_DIR,
+         agent.cgpt, agent.goto, agent.claims.ClaimSet) = self.saved
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _args(self):
+        return argparse.Namespace(workspace=self.dir, preset="review", task="t", session="app",
+                                  new=False, resume=False, write=False, allow_shell=False,
+                                  focus=False, max_rounds=2, max_chars=1000, round_chars=500,
+                                  timeout=1, poll=0, retries=1)
+
+    def _install_browser(self, vanish_twice=False):
+        outer = self
+        class Browser:
+            class CliError(RuntimeError): pass
+            class TabGone(CliError): pass
+            def __init__(self):
+                self.sent = []
+                self.wait_tabs = []
+                self.opened = []
+            def bridge(self, *args):
+                if args[0] == "list":
+                    return "1\t1\t101\thttps://chatgpt.com/c/original"
+                if args[0] == "focus":
+                    return "ok"
+                raise AssertionError(args)
+            def parse_tabs(self, raw):
+                return [(1, 1, 101, "https://chatgpt.com/c/original")]
+            def open_tab(self, url, timeout):
+                self.opened.append(url)
+                return 202
+            def needs_attachment(self, message): return False
+            def send(self, tab_id, message):
+                self.sent.append((tab_id, message))
+                return "marker-1"
+            def wait_for_reply(self, tab_id, marker, timeout, poll):
+                self.wait_tabs.append(tab_id)
+                if tab_id == 101:
+                    raise self.TabGone("gone")
+                if vanish_twice:
+                    raise self.TabGone("gone again")
+                return "done"
+            def eval_js(self, tab_id, expr):
+                return "https://chatgpt.com/c/original"
+            def ensure_tab(self, timeout):
+                return 101
+            def find_chatgpt_tab(self, tabs):
+                return 101
+        agent.cgpt = Browser()
+        agent.write_sessions({"app": {"url": "https://chatgpt.com/c/original", "tab_id": 101,
+                                      "updated": agent._now_stamp()}})
+        return agent.cgpt
+
+    def test_tab_gone_recovers_once_without_resending_and_rebinds_claim(self):
+        browser = self._install_browser()
+        answer = agent.run(self._args(), lambda line: None, {})
+        self.assertEqual(answer, "done")
+        self.assertEqual(len(browser.sent), 1)
+        self.assertEqual(browser.wait_tabs, [101, 202])
+        self.assertIn(("release_tab", 101), self.events)
+        self.assertIn(("claim_tab", 202), self.events)
+        self.assertEqual(agent.load_sessions()["app"]["tab_id"], 202)
+
+    def test_second_tab_gone_stops_and_names_conversation(self):
+        self._install_browser(vanish_twice=True)
+        with self.assertRaises(Exception) as caught:
+            agent.run(self._args(), lambda line: None, {})
+        self.assertIn("https://chatgpt.com/c/original", str(caught.exception))
+
+class WaitRecoveryHelperTest(unittest.TestCase):
+    def setUp(self):
+        self.saved = (agent.cgpt, agent.goto)
+        agent.goto = lambda *a, **k: None
+
+    def tearDown(self):
+        agent.cgpt, agent.goto = self.saved
+
+    def test_helper_recovers_once_and_second_disappearance_names_url(self):
+        class Browser:
+            class CliError(RuntimeError): pass
+            class TabGone(CliError): pass
+            def __init__(self):
+                self.waits = []
+            def open_tab(self, url, timeout): return 22
+            def wait_for_reply(self, tab_id, marker, timeout, poll):
+                self.waits.append(tab_id)
+                raise self.TabGone("gone")
+            def bridge(self, *args): return "ok"
+        class Held:
+            def __init__(self): self.events=[]
+            def release_tab(self, tab_id): self.events.append(("release", tab_id))
+            def claim_tab(self, tab_id): self.events.append(("claim", tab_id))
+        agent.cgpt = Browser()
+        args = argparse.Namespace(timeout=1, poll=0, retries=1, focus=False, session=None)
+        recovery = {"used": False}
+        held = Held()
+        with self.assertRaises(agent.cgpt.CliError) as caught:
+            agent.wait_with_tab_recovery(11, "m", "https://chatgpt.com/c/abc",
+                                         held, args, recovery, lambda line: None)
+        self.assertIn("https://chatgpt.com/c/abc", str(caught.exception))
+        self.assertEqual(agent.cgpt.waits, [11, 22])
+        self.assertEqual(held.events, [("release", 11), ("claim", 22)])
+        self.assertTrue(recovery["used"])

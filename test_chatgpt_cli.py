@@ -609,3 +609,86 @@ class MainWiringTest(unittest.TestCase):
     def test_no_bridge_call_when_focus_is_not_asked_for(self):
         _, calls = self._run_main()
         self.assertNotIn("bridge", calls)
+
+class OneShotSelectionTest(unittest.TestCase):
+    def test_claimed_first_candidate_uses_second_chatgpt_tab(self):
+        rows = "1\t1\t101\thttps://chatgpt.com/c/a\n1\t2\t202\thttps://chatgpt.com/c/b"
+        attempted = []
+        class Held:
+            def claim_tab(self, tab_id):
+                attempted.append(tab_id)
+                if tab_id == 101:
+                    raise cgpt.claims.ClaimBusy("busy")
+            def claim_conversation(self, identity):
+                pass
+            def release_tab(self, tab_id):
+                pass
+        real_bridge = cgpt.bridge
+        cgpt.bridge = lambda *args: rows if args[0] == "list" else (_ for _ in ()).throw(AssertionError(args))
+        try:
+            self.assertEqual(cgpt.claim_one_shot_tab(Held(), 3), 202)
+        finally:
+            cgpt.bridge = real_bridge
+        self.assertEqual(attempted, [101, 202])
+
+class OneShotConversationSelectionTest(unittest.TestCase):
+    def test_claimed_conversation_fails_immediately_and_names_holder(self):
+        rows = "1\t1\t101\thttps://chatgpt.com/c/a\n1\t2\t202\thttps://chatgpt.com/c/b"
+        attempted_tabs = []
+        released_tabs = []
+        class Held:
+            def claim_tab(self, tab_id):
+                attempted_tabs.append(tab_id)
+            def release_tab(self, tab_id):
+                released_tabs.append(tab_id)
+            def claim_conversation(self, identity):
+                if identity == "a":
+                    raise cgpt.claims.ClaimBusy("conversation a is already claimed by rival")
+        real_bridge, real_eval = cgpt.bridge, cgpt.eval_js
+        cgpt.bridge = lambda *args: rows if args[0] == "list" else (_ for _ in ()).throw(AssertionError(args))
+        cgpt.eval_js = lambda tab_id, expr: "https://chatgpt.com/c/a" if tab_id == 101 else "https://chatgpt.com/c/b"
+        try:
+            with self.assertRaises(cgpt.claims.ClaimBusy) as caught:
+                cgpt.claim_one_shot_tab(Held(), 3)
+        finally:
+            cgpt.bridge, cgpt.eval_js = real_bridge, real_eval
+        self.assertIn("rival", str(caught.exception))
+        self.assertEqual(attempted_tabs, [101])
+        self.assertEqual(released_tabs, [101])
+
+class OneShotPostSendConversationClaimTest(unittest.TestCase):
+    def test_main_claims_conversation_created_by_send_before_waiting(self):
+        events = []
+        class Held:
+            def __init__(self, owner): events.append(("new", owner))
+            def claim_tab(self, tab_id): events.append(("claim_tab", tab_id))
+            def release_tab(self, tab_id): events.append(("release_tab", tab_id))
+            def claim_conversation(self, identity): events.append(("claim_conversation", identity))
+            def close(self): pass
+
+        saved = {name: getattr(cgpt, name) for name in
+                 ("ensure_tab", "eval_js", "send", "wait_for_reply")}
+        real_claim_set = cgpt.claims.ClaimSet
+        calls = {"location": 0}
+        cgpt.ensure_tab = lambda timeout: 4242
+        def eval_js(tab_id, expression):
+            if expression == "location.href":
+                calls["location"] += 1
+                return ("https://chatgpt.com/" if calls["location"] == 1
+                        else "https://chatgpt.com/c/newly-created")
+            return {"ok": True}
+        cgpt.eval_js = eval_js
+        cgpt.send = lambda tab_id, text: "[c2c:marker]"
+        def wait_for_reply(tab_id, marker, timeout, poll):
+            self.assertIn(("claim_conversation", "newly-created"), events)
+            return "OK"
+        cgpt.wait_for_reply = wait_for_reply
+        cgpt.claims.ClaimSet = Held
+        stdout, sys.stdout = sys.stdout, io.StringIO()
+        try:
+            self.assertEqual(cgpt.main(["hello"]), 0)
+        finally:
+            sys.stdout = stdout
+            cgpt.claims.ClaimSet = real_claim_set
+            for name, value in saved.items():
+                setattr(cgpt, name, value)

@@ -12,6 +12,7 @@ Requires, once: Edge > View > Developer > Allow JavaScript from Apple Events.
 """
 
 import argparse
+import atexit
 import json
 import os
 import subprocess
@@ -20,7 +21,8 @@ import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import chatgpt_protocol as proto  # noqa: E402  (path set just above)
+import chatgpt_claims as claims  # noqa: E402  (path set just above)
+import chatgpt_protocol as proto  # noqa: E402
 
 try:
     from urllib.parse import urlsplit
@@ -435,9 +437,16 @@ def main(argv=None):
 
     try:
         tab_id = ensure_tab(args.timeout)
+        # This tab is shared: a long agent run may be working in it right now.
+        # Claiming it, and the conversation it shows, is what stops one answer
+        # from being read as the other's.
+        held = claims.ClaimSet("ask")
+        atexit.register(held.close)
+        held.claim_tab(tab_id)
         if args.focus:
             bridge("focus", tab_id)
 
+        held.claim_conversation(claims.conversation_id(eval_js(tab_id, "location.href")))
         status = eval_js(tab_id, "CGPT.probe()")
         if not status.get("ok"):
             raise CliError(
@@ -447,6 +456,9 @@ def main(argv=None):
 
         marker = send(tab_id, prompt)
         reply = wait_for_reply(tab_id, marker, args.timeout, args.poll)
+    except claims.ClaimBusy as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 1
     except CliError as exc:
         sys.stderr.write(str(exc) + "\n")
         return 1

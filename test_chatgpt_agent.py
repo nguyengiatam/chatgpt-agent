@@ -749,3 +749,76 @@ class HousekeepingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaimSpansTheRunTest(unittest.TestCase):
+    """The tab claim must cover the whole run, not each browser call.
+
+    A claim taken and dropped around individual calls passes any contention
+    test that happens to collide during one of them, and still leaves the tab
+    free between rounds - which is when a rival run takes it and starts writing
+    into the same conversation.
+    """
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self._runs, agent.RUNS_DIR = agent.RUNS_DIR, os.path.join(self.dir, "runs")
+        self._state, agent.STATE_DIR = agent.STATE_DIR, self.dir
+        self._sessions, agent.SESSIONS = agent.SESSIONS, os.path.join(self.dir, "sessions.json")
+        self._lock, agent.SESSIONS_LOCK = agent.SESSIONS_LOCK, os.path.join(self.dir, "sessions.lock")
+        self._claims, agent.claims.CLAIM_DIR = agent.claims.CLAIM_DIR, os.path.join(self.dir, "claims")
+        self._cgpt, self._ops, self._goto = agent.cgpt, agent.ops, agent.goto
+        agent.ops = _FakeOps()
+        agent.goto = lambda *a, **k: None
+
+    def tearDown(self):
+        agent.RUNS_DIR, agent.STATE_DIR, agent.SESSIONS = self._runs, self._state, self._sessions
+        agent.SESSIONS_LOCK = self._lock
+        agent.claims.CLAIM_DIR = self._claims
+        agent.cgpt, agent.ops, agent.goto = self._cgpt, self._ops, self._goto
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _rival_verdict(self, tab):
+        """What a separate process gets when it reaches for the same tab."""
+        code = (
+            "import sys\n"
+            "import chatgpt_claims as claims\n"
+            "try:\n"
+            "    claims.ClaimSet('rival').claim_tab(int(sys.argv[1]))\n"
+            "except claims.ClaimBusy as exc:\n"
+            "    print(str(exc)); raise SystemExit(23)\n"
+            "print('acquired')\n"
+        )
+        env = os.environ.copy()
+        env["CHATGPT_AGENT_CLAIM_DIR"] = agent.claims.CLAIM_DIR
+        proc = subprocess.Popen([sys.executable, "-c", code, str(tab)], cwd=_HERE,
+                                env=env, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        out, err = proc.communicate(timeout=30)
+        return proc.returncode, out, err
+
+    def test_a_rival_is_refused_while_the_owner_waits_between_rounds(self):
+        verdicts = []
+        outer = self
+
+        class Cgpt(_FakeCgpt):
+            def wait_for_reply(self, tab_id, marker, timeout, poll):
+                # A run spends most of its life in here, and the gap between
+                # two rounds sits inside it. A per-call claim leaves the tab
+                # free at exactly this moment.
+                verdicts.append(outer._rival_verdict(101))
+                return _FakeCgpt.wait_for_reply(self, tab_id, marker, timeout, poll)
+
+        agent.cgpt = Cgpt(["nothing to report."])
+        args = argparse.Namespace(
+            workspace=self.dir, preset="review", task="t", session=None, new=True,
+            resume=False, write=False, allow_shell=False, focus=False,
+            max_rounds=4, max_chars=1000, round_chars=500, timeout=1, poll=0,
+            retries=1,
+        )
+        agent.run(args, lambda line: None, {})
+
+        self.assertTrue(verdicts, "the loop never waited for a reply")
+        code, out, err = verdicts[0]
+        self.assertEqual(code, 23, "a rival took the tab between rounds: " + out + err)
+        self.assertIn("101", out)

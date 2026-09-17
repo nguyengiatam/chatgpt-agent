@@ -15,17 +15,22 @@ capabilities are chatgpt_ops, which has no write and no shell.
 """
 
 import argparse
+import atexit
 import calendar
+import contextlib
+import fcntl
 import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import chatgpt_claims as claims
 import chatgpt_ops as ops
 import chatgpt_protocol as proto
 
@@ -36,6 +41,7 @@ _spec.loader.exec_module(cgpt)
 PRESET_DIR = os.path.join(HERE, "presets")
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".chatgpt-agent")
 SESSIONS = os.path.join(STATE_DIR, "sessions.json")
+SESSIONS_LOCK = os.path.join(STATE_DIR, "sessions.lock")
 RUNS_DIR = os.path.join(STATE_DIR, "runs")
 NEW_CHAT_URL = "https://chatgpt.com/"
 DEFAULT_RUN = "_last"
@@ -281,29 +287,78 @@ def session_url(name):
 
 
 def write_sessions(sessions):
+    """Replace the store in one step, so a reader never sees half a file.
+
+    Truncating the real path and writing into it leaves a window in which the
+    store holds nothing, or holds a prefix that will not parse. With runs in
+    parallel that window is reachable: another run reads the store on its way
+    to recording its own binding.
+    """
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
-        with open(SESSIONS, "w") as handle:
-            json.dump(sessions, handle, indent=2)
+        handle, temporary = tempfile.mkstemp(dir=STATE_DIR, prefix="sessions-",
+                                             suffix=".tmp")
+        try:
+            with os.fdopen(handle, "w") as opened:
+                json.dump(sessions, opened, indent=2)
+            os.replace(temporary, SESSIONS)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
     except OSError:
         pass  # a lost bookmark is not worth failing a finished review over
 
 
+@contextlib.contextmanager
+def _sessions_locked():
+    """Serialise read-modify-write on the store shared by every run.
+
+    Each run records its binding when it ends. Two that read the store, add
+    their own entry and write it back can each write a version that never saw
+    the other, and the later write wins the whole file. The result is not a
+    corrupt store - it is a silently shorter one, which is harder to notice.
+    """
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        guard = open(SESSIONS_LOCK, "a+")
+    except OSError:
+        yield  # no lock available; a lost bookmark must not fail a real run
+        return
+    try:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
+        finally:
+            guard.close()
+
+
+def mutate_sessions(change):
+    """Apply `change` to the store while holding it exclusively."""
+    with _sessions_locked():
+        sessions = load_sessions()
+        change(sessions)
+        write_sessions(sessions)
+
+
 def save_session(name, url):
-    sessions = load_sessions()
-    sessions[name] = {"url": url, "updated": _now_stamp()}
-    write_sessions(sessions)
+    def change(sessions):
+        sessions[name] = {"url": url, "updated": _now_stamp()}
+    mutate_sessions(change)
 
 
 def touch_session(name):
     """A session being reused is in use, whatever its age says. Without this a
     conversation returned to every week would still be pruned as stale."""
-    sessions = load_sessions()
-    entry = sessions.get(name)
-    if not entry:
-        return
-    entry["updated"] = _now_stamp()
-    write_sessions(sessions)
+    def change(sessions):
+        entry = sessions.get(name)
+        if entry:
+            entry["updated"] = _now_stamp()
+    mutate_sessions(change)
 
 
 # --- run state -------------------------------------------------------------
@@ -394,10 +449,10 @@ def prune_apply(victims):
         if kind == "run":
             clear_run(name)
     if names:
-        sessions = load_sessions()
-        for name in names:
-            sessions.pop(name, None)
-        write_sessions(sessions)
+        def change(sessions):
+            for name in names:
+                sessions.pop(name, None)
+        mutate_sessions(change)
     return victims
 
 
@@ -606,6 +661,13 @@ def run(args, log, progress):
             + str(STATE_TTL_DAYS) + " days")
 
     tab_id = cgpt.ensure_tab(args.timeout)
+    # Held for the run, not around each call: the gap between two rounds is
+    # long enough for another run to take the tab mid-task. Nothing releases
+    # these by hand - the kernel drops them when this process ends, however it
+    # ends, which is what keeps a killed run from stranding a conversation.
+    held = claims.ClaimSet(name)
+    atexit.register(held.close)
+    held.claim_tab(tab_id)
     if args.focus:
         cgpt.bridge("focus", tab_id)
 
@@ -623,6 +685,7 @@ def run(args, log, progress):
         budget.spent = int(state.get("spent") or 0)
         progress["url"] = state.get("url")
         log("resuming " + repr(name) + " at round " + str(first_round))
+        held.claim_conversation(claims.conversation_id(state["url"]))
         goto(tab_id, state["url"], args.timeout)
         reply = recover_reply(tab_id, state.get("marker"), args.poll, log)
     else:
@@ -638,6 +701,7 @@ def run(args, log, progress):
         for fact in facts:
             log("  " + fact)
         log("conversation: " + (saved or "new chat"))
+        held.claim_conversation(claims.conversation_id(saved))
         goto(tab_id, saved or NEW_CHAT_URL, args.timeout)
         message = opening_message(preset, root, args.task, args.allow_shell,
                                   write=args.write, facts=facts)
@@ -669,6 +733,7 @@ def run(args, log, progress):
             url = cgpt.eval_js(tab_id, "location.href")
             if isinstance(url, str) and "/c/" in url:
                 progress["url"] = url
+                held.claim_conversation(claims.conversation_id(url))
                 log("conversation: " + url)
                 if args.session:
                     save_session(args.session, url)
@@ -843,11 +908,15 @@ def main(argv=None):
         return 0
 
     if args.forget:
-        sessions = load_sessions()
-        if sessions.pop(args.forget, None) is None:
+        dropped = []
+
+        def change(sessions):
+            dropped.append(sessions.pop(args.forget, None))
+
+        mutate_sessions(change)
+        if dropped[0] is None:
             sys.stderr.write("no session named " + repr(args.forget) + "\n")
             return 1
-        write_sessions(sessions)
         print("forgot " + args.forget)
         return 0
 
@@ -893,6 +962,11 @@ def main(argv=None):
     progress = {}
     try:
         answer = run(args, log, progress)
+    except claims.ClaimBusy as exc:
+        # Deliberately not a wait. Queueing behind a run that may last twenty
+        # minutes is worse than failing in a second with the holder named.
+        sys.stderr.write(str(exc) + "\n")
+        return 1
     except cgpt.CliError as exc:
         sys.stderr.write(str(exc) + "\n")
         if progress.get("url"):

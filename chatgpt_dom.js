@@ -330,8 +330,13 @@
     var hit = pickReply(entries, promptText);
     var body = null;
     if (hit) {
-      var node = nodes[hit.index];
-      body = node.querySelector(SELECTORS.markdownBody) || node;
+      // No fallback to the message node here, deliberately. An assistant turn
+      // exists in the DOM before its answer is rendered, and the bare node
+      // carries only chrome - on a Vietnamese Edge that reads "Bài viết".
+      // Falling back to it once produced a stable, non-empty "reply" that the
+      // Python side accepted and saved as a 12-byte review report. No markdown
+      // body means no answer yet, and an empty text keeps the caller waiting.
+      body = nodes[hit.index].querySelector(SELECTORS.markdownBody);
     }
     return {
       ok: true,

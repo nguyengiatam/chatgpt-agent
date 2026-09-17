@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.5
+
+**Fixed: a message's chrome could be read as its answer.** `state()` fell back to
+the whole assistant turn when it found no `.markdown` body. That turn exists in
+the DOM *before* its answer is rendered, and the bare node carries interface
+text — on a Vietnamese Edge, the label "Bài viết". Stable across polls and not
+empty, so the tracker called it finished and the run saved it: a review that had
+already done seven rounds of real work ended with a **12-byte report** reading
+`Bài viết`.
+
+`state()` no longer falls back. No markdown body means no answer yet, and the
+empty text it now reports is what already tells the caller to keep waiting.
+
+This is the same family as 0.3.4 — sampling the DOM before it is ready — but a
+different symptom, and 0.3.4's guards could not catch it: the text parses as an
+answer, it just isn't one. The blank-answer check added in 0.3.3 does not fire
+either, because `Bài viết` is not blank.
+
+⚠ Locale is what made this visible, not what caused it: the fallback returns
+chrome in any language. It had simply never been sampled that early before.
+
+
+
 ## 0.3.4
 
 **Fixed: replies were read while the code block was still being drawn.** 0.3.3

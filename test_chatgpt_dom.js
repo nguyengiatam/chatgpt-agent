@@ -375,3 +375,48 @@ test("sentWithAttachment reports nothing sent when there is no user turn", () =>
   assert.strictEqual(state.sent, false);
   assert.strictEqual(state.carried, false);
 });
+
+// --- state(): an assistant turn exists before its answer is rendered --------
+
+function assistantTurn(markdownBody, chromeText) {
+  return {
+    getAttribute: (a) => (a === "data-message-author-role" ? "assistant" : null),
+    textContent: chromeText,
+    querySelector: () => markdownBody,
+  };
+}
+
+function userTurn(text) {
+  return {
+    getAttribute: (a) => (a === "data-message-author-role" ? "user" : null),
+    textContent: text,
+    querySelector: () => null,
+  };
+}
+
+function pageWith(turn) {
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [userTurn("MARKER-1"), turn],
+    body: {},
+  };
+}
+
+test("state reports no text while the assistant turn has no markdown body", () => {
+  // Measured: the bare turn carries only chrome. On a Vietnamese Edge that is
+  // the label "Bài viết" - stable, non-empty, and once accepted as the whole
+  // answer, saving a 12-byte review report.
+  pageWith(assistantTurn(null, "Bài viết"));
+  const state = CGPT.state("MARKER-1");
+  assert.strictEqual(state.found, true);
+  assert.strictEqual(state.text, "");
+  assert.strictEqual(state.markdown, "");
+});
+
+test("state reads the answer once the markdown body exists", () => {
+  const body = el("DIV", ["GO - nothing found."]);
+  pageWith(assistantTurn(body, "Bài viết GO - nothing found."));
+  const state = CGPT.state("MARKER-1");
+  assert.strictEqual(state.text, "GO - nothing found.");
+  assert.ok(state.markdown.includes("GO - nothing found."));
+});

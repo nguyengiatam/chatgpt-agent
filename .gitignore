@@ -3,5 +3,6 @@ __pycache__/
 .DS_Store
 
 # Local scratch notes, deliberately unpublished
+docs/superpowers/STATUS.local.md
 KNOWN-ISSUES.local.md
 SUBMISSION.local.md

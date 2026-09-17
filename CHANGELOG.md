@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+**Kiro CLI integration**, and **one version across every manifest**.
+
+The three manifests had drifted apart: `plugin.json` (Kiro) said `0.4.0`,
+`.claude-plugin/plugin.json` said `0.3.5`, and `.claude-plugin/marketplace.json`
+had been left at `0.3.2` for three releases. A stale marketplace version is the
+one that bites in practice — it is what a fresh install resolves. All three now
+read `0.4.0` and move together.
+
+This release carries the Kiro skills and docs added in #1 on top of the 0.3.3 →
+0.3.5 bridge fixes.
+
+
+
 ## 0.3.5
 
 **Fixed: a message's chrome could be read as its answer.** `state()` fell back to

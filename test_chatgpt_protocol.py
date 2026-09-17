@@ -302,3 +302,37 @@ class UntaggedRequestTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PageErrorTest(unittest.TestCase):
+    """A notice the page renders instead of an answer is not an answer.
+
+    These arrive as an ordinary assistant message, so the loop read them as the
+    model's final word and ended the run reporting success. Two of four
+    dispatches died that way with an exit code of 0.
+    """
+
+    def test_the_send_timeout_notice_is_recognised(self):
+        self.assertTrue(proto.is_page_error(
+            "Đã hết thời gian chờ gửi tin nhắn. Vui lòng thử lại."))
+
+    def test_the_english_notices_are_recognised(self):
+        for notice in ("Something went wrong.",
+                       "There was an error generating a response.",
+                       "Network error"):
+            self.assertTrue(proto.is_page_error(notice), notice)
+
+    def test_an_ordinary_answer_is_not_an_error(self):
+        self.assertFalse(proto.is_page_error("GO - nothing found."))
+
+    def test_an_empty_reply_is_not_a_page_error(self):
+        # That case belongs to is_blank_answer, which asks again for its own
+        # reasons. Claiming it here would give one failure two owners.
+        self.assertFalse(proto.is_page_error(""))
+        self.assertFalse(proto.is_page_error("   \n  "))
+
+    def test_a_long_answer_quoting_a_notice_is_discussing_it_not_suffering_it(self):
+        reply = ("The retry path is reached when the page renders "
+                 "'Something went wrong' in place of a reply. " + "x" * 400)
+        self.assertGreater(len(reply), proto.PAGE_ERROR_CHARS)
+        self.assertFalse(proto.is_page_error(reply))

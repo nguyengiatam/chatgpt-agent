@@ -756,6 +756,18 @@ def run(args, log, progress):
             # A reply with no block is the final answer - but only if it says
             # something. An empty one ends the run and gets saved as the result,
             # which is how a formatting stumble once produced a ten-byte report.
+            if proto.is_page_error(reply):
+                bad_format += 1
+                if bad_format >= MAX_BAD_FORMAT:
+                    raise cgpt.CliError(
+                        "ChatGPT's page reported a failure " + str(bad_format)
+                        + " times in a row instead of answering - giving up rather "
+                        "than reporting its error as the result. Last: " + reply.strip()
+                    )
+                log("  the page reported an error, not an answer - attempt "
+                    + str(bad_format) + "/" + str(MAX_BAD_FORMAT) + ", asking again")
+                message, reply = EMPTY_REPLY, None
+                continue
             if proto.is_blank_answer(reply):
                 bad_format += 1
                 if bad_format >= MAX_BAD_FORMAT:
@@ -959,6 +971,13 @@ def main(argv=None):
             sys.stderr.write(line + "\n")
             sys.stderr.flush()
 
+    # A write run that commits nothing looks exactly like one that worked: same
+    # exit code, same shape of answer. Twice now a dispatch returned an
+    # explanation of why it had stopped and that read as a result. HEAD is the
+    # one fact that settles it, so it gets stated either way.
+    landing = workspace_root(args.workspace) if args.write else None
+    before = _first_line(["git", "rev-parse", "HEAD"], landing) if landing else None
+
     progress = {}
     try:
         answer = run(args, log, progress)
@@ -979,6 +998,14 @@ def main(argv=None):
     except KeyboardInterrupt:
         sys.stderr.write("interrupted\n")
         return 130
+
+    if landing:
+        after = _first_line(["git", "rev-parse", "HEAD"], landing)
+        if after and after == before:
+            log("note: this write run committed nothing - HEAD is still "
+                + before[:7] + ". Whatever it says below, the repository is unchanged.")
+        elif after:
+            log("committed: " + (before or "?")[:7] + " -> " + after[:7])
 
     if args.out:
         with open(args.out, "w") as handle:

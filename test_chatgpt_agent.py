@@ -822,3 +822,45 @@ class ClaimSpansTheRunTest(unittest.TestCase):
         code, out, err = verdicts[0]
         self.assertEqual(code, 23, "a rival took the tab between rounds: " + out + err)
         self.assertIn("101", out)
+
+
+class PageErrorReplyTest(unittest.TestCase):
+    """The page's own failure notice must not be reported as the run's result."""
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self._runs, agent.RUNS_DIR = agent.RUNS_DIR, os.path.join(self.dir, "runs")
+        self._state, agent.STATE_DIR = agent.STATE_DIR, self.dir
+        self._sessions, agent.SESSIONS = agent.SESSIONS, os.path.join(self.dir, "sessions.json")
+        self._lock, agent.SESSIONS_LOCK = agent.SESSIONS_LOCK, os.path.join(self.dir, "sessions.lock")
+        self._claims, agent.claims.CLAIM_DIR = agent.claims.CLAIM_DIR, os.path.join(self.dir, "claims")
+        self._cgpt, self._ops, self._goto = agent.cgpt, agent.ops, agent.goto
+        agent.ops = _FakeOps()
+        agent.goto = lambda *a, **k: None
+
+    def tearDown(self):
+        agent.RUNS_DIR, agent.STATE_DIR, agent.SESSIONS = self._runs, self._state, self._sessions
+        agent.SESSIONS_LOCK, agent.claims.CLAIM_DIR = self._lock, self._claims
+        agent.cgpt, agent.ops, agent.goto = self._cgpt, self._ops, self._goto
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _run(self, replies):
+        agent.cgpt = _FakeCgpt(replies)
+        args = argparse.Namespace(
+            workspace=self.dir, preset="review", task="t", session=None, new=True,
+            resume=False, write=False, allow_shell=False, focus=False,
+            max_rounds=10, max_chars=1000, round_chars=500, timeout=1, poll=0,
+            retries=1,
+        )
+        return agent.run(args, lambda line: None, {})
+
+    def test_a_page_error_is_asked_again_not_returned(self):
+        answer = self._run(["Đã hết thời gian chờ gửi tin nhắn. Vui lòng thử lại.",
+                            "GO - nothing found."])
+        self.assertEqual(answer, "GO - nothing found.")
+
+    def test_three_page_errors_in_a_row_fail_the_run(self):
+        with self.assertRaises(Exception) as caught:
+            self._run(["Something went wrong.", "Network error",
+                       "There was an error generating a response."])
+        self.assertIn("page reported a failure", str(caught.exception))

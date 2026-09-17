@@ -106,6 +106,41 @@ def is_blank_answer(reply):
     return not _BACKTICK_RUN.sub(" ", outside).strip()
 
 
+# Notices the page itself renders in place of an answer. They arrive as an
+# assistant message like any other, so the loop reads them as the model's final
+# word and ends the run reporting success. Twice in four dispatches that turned
+# a dead run into an exit code of 0.
+#
+# Matched only in a short reply: a long answer that happens to quote one of
+# these is discussing it, not suffering it. The list is deliberately literal -
+# guessing at the shape of an error message ends good runs.
+_PAGE_ERRORS = (
+    "đã hết thời gian chờ gửi tin nhắn",
+    "message send timed out",
+    "something went wrong",
+    "there was an error generating a response",
+    "network error",
+    "conversation not found",
+    "bạn đã đạt giới hạn",
+    "you've reached our limit",
+)
+
+PAGE_ERROR_CHARS = 300
+
+
+def is_page_error(reply):
+    """True when `reply` is the page reporting a failure, not the model answering.
+
+    The caller re-asks rather than accepting it, because these are transient:
+    the same prompt usually goes through on the next attempt.
+    """
+    text = (reply or "").strip()
+    if not text or len(text) > PAGE_ERROR_CHARS:
+        return False
+    low = text.lower()
+    return any(phrase in low for phrase in _PAGE_ERRORS)
+
+
 def _snippet(raw, width=120):
     """A one-line excerpt of a bad block, so the failure can be diagnosed."""
     flat = " ".join((raw or "").split())

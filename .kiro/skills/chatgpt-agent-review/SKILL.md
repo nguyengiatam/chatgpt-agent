@@ -23,10 +23,10 @@ Examples:
 
 The bridge is read-only by default. Do not add `--allow-shell` unless the user explicitly asks ChatGPT to execute commands.
 
-If the command fails, run:
+If the command fails, run the doctor script:
 
 ```bash
-python3 ./chatgpt-agent.py --preset doctor
+python3 ./scripts/doctor.py
 ```
 
 Present ChatGPT's review as returned by the command. Do not silently rewrite or reorder its findings.

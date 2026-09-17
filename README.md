@@ -68,9 +68,9 @@ Power using the Agent Plugins format.
 
 ### Option A — use the workspace skills
 
-Clone the repository and open your project with Kiro CLI. The skills under
-`.kiro/skills/` are discovered automatically by Kiro CLI and can also be
-invoked as slash commands.
+The workspace skills are for working on this repository itself. Clone the
+repository and open it with Kiro CLI; the skills under `.kiro/skills/` are
+discovered automatically and can be invoked as slash commands.
 
 ```bash
 git clone https://github.com/nguyengiatam/chatgpt-agent.git
@@ -89,9 +89,9 @@ Available skills:
 | `/chatgpt-agent-doctor` | check the ChatGPT Agent prerequisites |
 | `/chatgpt-agent-sessions` | list or manage saved ChatGPT conversations |
 
-You can also install an individual skill from the repository through Kiro's
-skill importer by selecting the corresponding `skills/<name>/` directory or
-`SKILL.md` file.
+For another project, use the Power installation below or import an individual
+skill from GitHub. Kiro's skill importer accepts the corresponding
+`skills/<name>/` directory or its `SKILL.md` file.
 
 ### Option B — install the repository as a Kiro Power
 

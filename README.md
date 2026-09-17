@@ -1,6 +1,6 @@
 # ChatGPT Agent
 
-Delegate work to the **ChatGPT web UI** from the shell or from Claude Code,
+Delegate work to the **ChatGPT web UI** from the shell, Claude Code, or Kiro CLI,
 through the Microsoft Edge window you are already signed in to. Built for
 accounts that browser-automation tools cannot log in to.
 
@@ -31,30 +31,23 @@ cannot type into the wrong tab.
 ./chatgpt-agent.py --write "Implement docs/plans/retry.md on this branch."
 ```
 
-A run reports its rounds on stderr and the answer on stdout:
-
-```
-workspace: /Users/me/code/app (write)
-  on branch add-retry at 9f2c1a4, worktree clean
-  Node project; dependencies are installed at <root>/node_modules
-  data budget: 700000 chars, 120000 per round
-round 1/24 - asking ChatGPT
-  served 3 op(s): git_diff, read, search        [11482/700000 chars]
-```
+A run reports its rounds on stderr and the answer on stdout.
 
 ## Install as a Claude Code plugin
 
 Source: **https://github.com/nguyengiatam/chatgpt-agent** — worth reading first,
 since a plugin runs on your machine.
 
-```
+```text
 /plugin marketplace add https://github.com/nguyengiatam/chatgpt-agent.git
 /plugin install chatgpt-agent@chatgpt-agent-marketplace
 ```
 
-Then `/chatgpt-agent:doctor` before anything else — this plugin has more hard
-requirements than most, and the doctor names whichever one is missing. To
-update later: `/plugin marketplace update chatgpt-agent-marketplace`.
+Then `/chatgpt-agent:doctor` before anything else. To update later:
+
+```text
+/plugin marketplace update chatgpt-agent-marketplace
+```
 
 | Command | Purpose |
 |---|---|
@@ -68,21 +61,79 @@ update later: `/plugin marketplace update chatgpt-agent-marketplace`.
 The `chatgpt-reviewer` agent forwards the same thing from a subagent when the
 main thread should not spend context on it.
 
-## Requirements and setup
+## Install with Kiro CLI
 
-- macOS, Microsoft Edge, signed in to ChatGPT
-- Python 3 — standard library only, nothing to install
-- Node only if you want to run the JavaScript tests
+This repository supports Kiro in two ways: as workspace skills and as a Kiro
+Power using the Agent Plugins format.
 
-One toggle, once, in Edge's menu bar:
+### Option A — use the workspace skills
 
-**View › Developer › Allow JavaScript from Apple Events**
+Clone the repository and open your project with Kiro CLI. The skills under
+`.kiro/skills/` are discovered automatically by Kiro CLI and can also be
+invoked as slash commands.
 
-Without it Edge refuses the injection and the tool says so. macOS will also ask,
-on first run, to let your terminal control Edge — accept it, or set it later
-under *System Settings › Privacy & Security › Automation*.
+```bash
+git clone https://github.com/nguyengiatam/chatgpt-agent.git
+cd chatgpt-agent
+kiro-cli
+```
 
-Run `python3 scripts/doctor.py` to check all of it at once.
+Available skills:
+
+| Skill | Purpose |
+|---|---|
+| `/chatgpt-agent-review` | review a diff, branch or working tree |
+| `/chatgpt-agent-plan` | write an implementation plan |
+| `/chatgpt-agent-implement` | implement a change, test it and commit locally |
+| `/chatgpt-agent-ask` | ask ChatGPT a one-shot question |
+| `/chatgpt-agent-doctor` | check the ChatGPT Agent prerequisites |
+| `/chatgpt-agent-sessions` | list or manage saved ChatGPT conversations |
+
+You can also install an individual skill from the repository through Kiro's
+skill importer by selecting the corresponding `skills/<name>/` directory or
+`SKILL.md` file.
+
+### Option B — install the repository as a Kiro Power
+
+The repository contains a root `plugin.json` and packaged skills under
+`skills/`, so it can be installed as a custom Kiro Power.
+
+In Kiro:
+
+1. Open the **Powers** panel.
+2. Select **Add Custom Power**.
+3. Choose **Import power from GitHub**.
+4. Enter `https://github.com/nguyengiatam/chatgpt-agent`.
+5. Install the power.
+
+Kiro CLI supports Powers from v3. The same Power can therefore be used from
+Kiro CLI after installation.
+
+The Power contains the same six skills listed above. It does not duplicate the
+ChatGPT browser bridge; every skill delegates to the existing scripts in this
+repository.
+
+### Kiro requirements
+
+Kiro itself can run on supported macOS, Linux, and Windows environments, but
+this ChatGPT Agent runtime requires **macOS + Microsoft Edge**, because it uses
+Apple Events to control Edge.
+
+You also need:
+
+- Python 3 — standard library only, nothing to install for the runtime
+- Microsoft Edge signed in to ChatGPT
+- Edge's **View › Developer › Allow JavaScript from Apple Events** enabled
+- permission for your terminal to control Microsoft Edge under macOS
+  **System Settings › Privacy & Security › Automation**
+
+Run the doctor skill or:
+
+```bash
+python3 scripts/doctor.py
+```
+
+to check the prerequisites.
 
 ## What it can and cannot do
 
@@ -92,75 +143,24 @@ workspace is caught, then containment, then a block on `.env*`, private keys
 and credential files. The model cannot argue with a rule it cannot see. With
 shell off, an instruction hidden in a repository has nothing to reach.
 
-`--allow-shell` changes that, on purpose. Some questions — *does this suite
-actually catch this bug?* — cannot be answered by reading, so the flag adds one
-op that runs real commands on your machine, as you, with `cwd` wherever the
-model asks:
-
-```bash
-./chatgpt-agent.py --preset review --allow-shell \
-  "Copy the repo to /tmp/mt, flip the comparison on line 47 there, run the tests,
-   and tell me whether they went red."
-```
-
-Three things bound it, and it is worth being exact about which is which:
-
-- **It does not exist unless you pass the flag.** Ordinary reviews stay
-  read-only. This is the control that actually matters.
-- **Every command is printed before it runs**, so an unattended loop still
-  leaves you a record of what happened.
-- **`shell_objection` refuses work that is not a reviewer's**: recursive
-  deletes, escalation, publishing, reaching another host, reading credentials,
-  destroying local work. This bounds the **role** — it catches a model that
-  drifts or blunders. It is **not** a sandbox, and anyone determined to spell a
-  command differently will. The command runs as you either way.
-
-So there are three states, and which one you are in is a flag you passed:
-read-only by construction, commands because you asked for them with
-`--allow-shell`, or the workspace as the target with `--write`. None of them is
-a fence around a shell that is already running as you.
+`--allow-shell` changes that, on purpose. Some questions cannot be answered by
+reading, so the flag adds one op that runs real commands on your machine, as
+you, with `cwd` wherever the model asks. The commands are printed before they
+run and safety checks refuse destructive or publishing operations.
 
 ### `--write`: implementing, not reviewing
 
-`--allow-shell` makes changing the tree *possible*; everything else in a review
-run points away from it, and a model given a build task spends its first rounds
-arguing with its own briefing. `--write` is the mode that says the workspace is
-the target:
+`--write` is the mode that says the workspace is the target:
 
 ```bash
 ./chatgpt-agent.py --write --session add-retry \
   "Implement the brief at docs/plans/retry.md. Branch is already checked out."
 ```
 
-It implies `--allow-shell` and loads the `implement` preset, which asks for the
-smallest change that satisfies the task, the full suite rather than a filtered
-subset, and a commit on the branch that is already checked out. There is no
-separate write op: the model writes files the way you would at a terminal, with
-a heredoc or an editor command.
-
-What stays refused is what a local change has no business doing — pushing,
-publishing, merging to the default branch, rewriting history — so the result
-sits in your worktree for you to read before it goes anywhere. Deliberate
-breaks still belong in a copy under `/tmp`: seeding a mutation to prove a new
-test really fails is part of the job, leaving the workspace holding that
-mutation is not.
-
-The run also opens with the facts it would otherwise burn rounds discovering —
-branch and HEAD, whether the worktree is clean, whether Node dependencies are
-installed and where, which scripts `package.json` defines, which toolchain
-markers are present. Facts only; anything that cannot be established is left
-out rather than guessed at.
-
-Two things it does not change. A green suite is evidence about the suite, not
-about the change — read the diff. And the bridge still drives one browser tab,
-so runs stay one at a time.
-
-Implement runs also get a larger data budget — 700,000 characters against a
-review's 250,000. The first real one spent a review's budget inside four rounds
-and never reached an edit: reading the files to change, the conventions around
-them and one reference implementation costs more than reading a diff. Keep an
-eye on the `[spent/total]` counter in the progress log, and prefer `sed -n`
-ranges over `cat` on large reference files.
+It implies `--allow-shell` and loads the `implement` preset. The model edits
+files, runs tests and commits on the branch that is already checked out.
+Pushing, publishing, merging to the default branch and rewriting history are
+refused by the runtime.
 
 ## Flags
 
@@ -185,15 +185,9 @@ Without `--session`, every run starts a fresh chat and nothing is remembered.
 
 ## One run at a time
 
-The bridge steers a single browser tab: `ensure_tab` takes the first ChatGPT tab
-it finds and navigates it. A second run started while the first is generating
-steers that conversation out from under it and fails with *Could not press
-Send*. There is no parallel mode.
-
-Continuing an exhausted run under the same `--session` does not buy anything
-either: the data budget resets per run, but every result already served stays in
-the conversation, so the next run starts near the model's context limit. Start a
-fresh chat and carry the findings across in the prompt.
+The bridge steers a single browser tab. A second run started while the first is
+generating can steer that conversation out from under it and fail. There is no
+parallel mode.
 
 ## Troubleshooting
 
@@ -205,9 +199,6 @@ fresh chat and carry the findings across in the prompt.
 | *The ChatGPT tab has no composer* | The tab is on a login, Cloudflare or error page |
 | *Could not press Send* | Usually a ChatGPT redesign — see below |
 | *Timed out …* | Raise `--timeout`; the message reports how much text had arrived |
-
-Error matching is by **numeric AppleScript code**, not English text, because
-macOS localises these messages.
 
 ## More
 

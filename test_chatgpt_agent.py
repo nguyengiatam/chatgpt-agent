@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the orchestrator's pure parts (no browser)."""
 
+import argparse
 import importlib.util
 import json
 import os
@@ -346,6 +347,148 @@ class AttemptTest(unittest.TestCase):
         agent.attempt("wait", 3, self._log, action)
         self.assertTrue(any("retrying" in line for line in self.logged))
 
+
+
+class _FakeCgpt:
+    """Just enough browser for the round loop: hand it the replies to give."""
+
+    CliError = RuntimeError
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.sent = []
+
+    def ensure_tab(self, timeout):
+        return 1, 1
+
+    def bridge(self, *a):
+        return "done" if a and a[0] == "loading" else ""
+
+    def needs_attachment(self, message):
+        return False
+
+    def send(self, window, tab, message):
+        self.sent.append(message)
+        return "marker"
+
+    def wait_for_reply(self, window, tab, marker, timeout, poll):
+        if not self.replies:
+            raise AssertionError("the loop asked for more replies than the test gave it")
+        return self.replies.pop(0)
+
+    def eval_js(self, window, tab, expr):
+        if "probe" in expr:
+            return {"ok": True}
+        return "https://chatgpt.com/c/test"
+
+
+class _FakeOps:
+    def execute(self, root, op, limit, allow_shell, role):
+        return {"label": str(op.get("op")), "body": "ok"}
+
+
+class MalformedBlockTest(unittest.TestCase):
+    """A bad c2c block must be re-asked, and must never end the run quietly."""
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self._runs, agent.RUNS_DIR = agent.RUNS_DIR, os.path.join(self.dir, "runs")
+        self._state, agent.STATE_DIR = agent.STATE_DIR, self.dir
+        self._sessions, agent.SESSIONS = agent.SESSIONS, os.path.join(self.dir, "sessions.json")
+        self._cgpt, self._ops, self._goto = agent.cgpt, agent.ops, agent.goto
+        agent.ops = _FakeOps()
+        agent.goto = lambda *a, **k: None
+
+    def tearDown(self):
+        agent.RUNS_DIR, agent.STATE_DIR, agent.SESSIONS = self._runs, self._state, self._sessions
+        agent.cgpt, agent.ops, agent.goto = self._cgpt, self._ops, self._goto
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _args(self, **over):
+        values = dict(
+            workspace=self.dir, preset="review", task="t", session=None, new=True,
+            resume=False, write=False, allow_shell=False, focus=False,
+            max_rounds=10, max_chars=1000, round_chars=500, timeout=1, poll=0,
+            retries=1,
+        )
+        values.update(over)
+        return argparse.Namespace(**values)
+
+    def _run(self, replies):
+        agent.cgpt = _FakeCgpt(replies)
+        lines = []
+        answer = agent.run(self._args(), lines.append, {})
+        return answer, lines, agent.cgpt.sent
+
+    def test_a_bad_block_is_re_asked_instead_of_ending_the_run(self):
+        answer, _, sent = self._run(['```c2c\n{"ops":[{"op":\n```', "GO - nothing found."])
+        self.assertEqual(answer, "GO - nothing found.")
+        self.assertIn("Send the c2c block again", sent[-1])
+
+    def test_the_correction_never_offers_to_finish(self):
+        # The old wording said "or omit it to finish" and the model took it.
+        self._run(['```c2c\n{"ops":[{"op":\n```', "GO."])
+        self.assertNotIn("omit it to finish", "\n".join(agent.cgpt.sent))
+
+    def test_three_bad_blocks_in_a_row_stop_the_run(self):
+        bad = '```c2c\n{"ops":[{"op":\n```'
+        with self.assertRaises(Exception) as caught:
+            self._run([bad, bad, bad])
+        self.assertIn("3 times in a row", str(caught.exception))
+
+    def test_two_bad_blocks_then_a_good_one_still_finishes(self):
+        bad = '```c2c\n{"ops":[{"op":\n```'
+        answer, _, _ = self._run([bad, bad, "NOT-GO: one finding."])
+        self.assertEqual(answer, "NOT-GO: one finding.")
+
+    def test_the_counter_resets_after_a_served_round(self):
+        bad = '```c2c\n{"ops":[{"op":\n```'
+        good = '```c2c\n{"ops":[{"op":"read","path":"x"}]}\n```'
+        answer, _, _ = self._run([bad, good, bad, bad, "GO."])
+        self.assertEqual(answer, "GO.")
+
+
+class EmptyAnswerTest(unittest.TestCase):
+    """An empty reply is not an answer - it must never be saved as the result."""
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self._runs, agent.RUNS_DIR = agent.RUNS_DIR, os.path.join(self.dir, "runs")
+        self._state, agent.STATE_DIR = agent.STATE_DIR, self.dir
+        self._sessions, agent.SESSIONS = agent.SESSIONS, os.path.join(self.dir, "sessions.json")
+        self._cgpt, self._ops, self._goto = agent.cgpt, agent.ops, agent.goto
+        agent.ops = _FakeOps()
+        agent.goto = lambda *a, **k: None
+
+    def tearDown(self):
+        agent.RUNS_DIR, agent.STATE_DIR, agent.SESSIONS = self._runs, self._state, self._sessions
+        agent.cgpt, agent.ops, agent.goto = self._cgpt, self._ops, self._goto
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _args(self):
+        return argparse.Namespace(
+            workspace=self.dir, preset="review", task="t", session=None, new=True,
+            resume=False, write=False, allow_shell=False, focus=False,
+            max_rounds=10, max_chars=1000, round_chars=500, timeout=1, poll=0,
+            retries=1,
+        )
+
+    def _run(self, replies):
+        agent.cgpt = _FakeCgpt(replies)
+        return agent.run(self._args(), lambda line: None, {})
+
+    def test_an_empty_reply_is_asked_again_not_returned(self):
+        answer = self._run(["```c\n\n```", "GO - nothing found."])
+        self.assertEqual(answer, "GO - nothing found.")
+        self.assertIn("empty", "\n".join(agent.cgpt.sent).lower())
+
+    def test_three_empty_replies_stop_the_run(self):
+        with self.assertRaises(Exception) as caught:
+            self._run(["```c\n\n```", "   ", "```\n\n```"])
+        self.assertIn("nothing", str(caught.exception).lower())
+
+    def test_a_real_answer_is_still_returned_untouched(self):
+        self.assertEqual(self._run(["GO - nothing found."]), "GO - nothing found.")
 
 if __name__ == "__main__":
     unittest.main()

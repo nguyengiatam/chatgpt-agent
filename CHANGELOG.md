@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.3
+
+**Fixed: a malformed `c2c` block could end a run with an empty result.** The
+corrective turn told the model `"Re-send the block, or omit it to finish."` — an
+escape hatch offered at the exact moment it is confused. It took it. The next
+reply had no block, the loop read that as the final answer, wrote it to `--out`
+and exited 0. Measured: a review run produced a **ten-byte report** whose whole
+content was an empty ```` ```c ```` fence, with no error anywhere in the log.
+
+Three changes, all in that path:
+
+- The correction now asks for the block again and says plainly that the run is
+  not finished. It never suggests stopping.
+- **Three consecutive failures stop the run** (`MAX_BAD_FORMAT`), up from two.
+  A single bad block is usually a rendering stumble and worth re-asking twice;
+  three in a row is a broken conversation, and the error now says how many.
+- **An empty reply is no longer an answer.** `proto.is_blank_answer` treats a
+  reply that is only whitespace and empty fences as blank; the loop re-asks for
+  it and, after three, fails loudly rather than saving nothing as a result.
+  A fence with real content still counts as an answer.
+
+The counter still resets after any served round, so a long run is not punished
+for one stumble early on.
+
+⚠ Not fixed here: *why* the block arrives malformed. Every observed case was cut
+mid-token and ended in `]()` — `toMarkdown`'s anchor output — which suggests the
+reply is being captured while the code block is still rendering, before it
+becomes a `<pre>`. That is a capture-timing question in `StabilityTracker` and
+`CGPT.state`, and it needs its own reproduction.
+
+
 ## 0.3.2
 
 **Fixed: an implement run that ran out of rounds could not save its work.**

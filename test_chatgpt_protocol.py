@@ -232,5 +232,30 @@ class LenientJsonTest(unittest.TestCase):
             self.fail("expected ProtocolError")
 
 
+
+class BlankAnswerTest(unittest.TestCase):
+    """A reply with no block ends the run, so "empty" must be recognised."""
+
+    def test_nothing_at_all_is_blank(self):
+        self.assertTrue(proto.is_blank_answer(""))
+        self.assertTrue(proto.is_blank_answer(None))
+        self.assertTrue(proto.is_blank_answer("   \n\t "))
+
+    def test_a_fence_with_an_empty_body_is_blank(self):
+        # The exact reply that once got saved as a ten-byte review report.
+        self.assertTrue(proto.is_blank_answer("```c\n\n```"))
+
+    def test_bare_backticks_are_blank(self):
+        self.assertTrue(proto.is_blank_answer("`` ` ``"))
+
+    def test_prose_is_not_blank(self):
+        self.assertFalse(proto.is_blank_answer("GO - no findings."))
+
+    def test_an_answer_that_lives_entirely_in_a_fence_is_not_blank(self):
+        self.assertFalse(proto.is_blank_answer("```\nGO\n```"))
+
+    def test_a_fence_plus_prose_is_not_blank(self):
+        self.assertFalse(proto.is_blank_answer("```c\n\n```\n\nNOT-GO: one finding."))
+
 if __name__ == "__main__":
     unittest.main()

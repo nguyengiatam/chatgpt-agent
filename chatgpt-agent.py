@@ -420,6 +420,28 @@ def opening_message(preset, root, task, shell=False, write=False, facts=None):
     ])
 
 
+# Three strikes, then stop: a model that cannot produce a usable block twice
+# running is unlikely to on the third, and a run that limps on wastes the
+# session's budget while looking healthy.
+MAX_BAD_FORMAT = 3
+
+# The old wording ended "Re-send the block, or omit it to finish." - an escape
+# hatch offered at the exact moment the model is confused. It took it: the next
+# reply had no block, the loop read that as the final answer, and the run exited
+# 0 with an empty report. Never invite the model to stop here.
+RESEND_BLOCK = (
+    "{error}\n\n"
+    "That block could not be parsed. Send the c2c block again - corrected, "
+    "complete, and inside a single ```c2c fence. Do not drop it, do not "
+    "summarise, and do not answer instead: this run is not finished."
+)
+
+EMPTY_REPLY = (
+    "Your last reply was empty. If you still need data, send a c2c block. "
+    "If you are done, give the full answer in text - an empty reply is not an answer."
+)
+
+
 def run(args, log, progress):
     budget = proto.Budget(args.max_chars, args.round_chars)
     name = args.session or DEFAULT_RUN
@@ -494,13 +516,31 @@ def run(args, log, progress):
             requested = proto.extract_ops(reply)
         except proto.ProtocolError as exc:
             bad_format += 1
-            if bad_format > 1:
-                raise cgpt.CliError("ChatGPT kept sending an unusable request: " + str(exc))
-            log("  malformed request (" + str(exc) + ") - asking once for a correction")
-            message, reply = str(exc) + ". Re-send the block, or omit it to finish.", None
+            if bad_format >= MAX_BAD_FORMAT:
+                raise cgpt.CliError(
+                    "ChatGPT sent an unusable request " + str(bad_format)
+                    + " times in a row - giving up. Last error: " + str(exc)
+                )
+            log("  malformed request (" + str(exc) + ") - attempt "
+                + str(bad_format) + "/" + str(MAX_BAD_FORMAT) + ", asking for a re-send")
+            message, reply = RESEND_BLOCK.format(error=str(exc)), None
             continue
 
         if requested is None:
+            # A reply with no block is the final answer - but only if it says
+            # something. An empty one ends the run and gets saved as the result,
+            # which is how a formatting stumble once produced a ten-byte report.
+            if proto.is_blank_answer(reply):
+                bad_format += 1
+                if bad_format >= MAX_BAD_FORMAT:
+                    raise cgpt.CliError(
+                        "ChatGPT answered with nothing " + str(bad_format)
+                        + " times in a row - giving up rather than saving an empty result."
+                    )
+                log("  empty reply - attempt " + str(bad_format) + "/"
+                    + str(MAX_BAD_FORMAT) + ", asking again")
+                message, reply = EMPTY_REPLY, None
+                continue
             clear_run(name)
             return reply
 

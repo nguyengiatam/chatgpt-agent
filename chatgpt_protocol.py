@@ -37,6 +37,25 @@ def extract_ops(reply):
     return None
 
 
+def is_blank_answer(reply):
+    """True when `reply` carries no answer at all - only fences and whitespace.
+
+    A reply with no c2c block is taken as the final answer, so an empty one
+    ends the run and gets written to --out as if it were a result. That has
+    happened: a malformed-block round was followed by a bare "```c\n\n```",
+    which the loop accepted and saved as a ten-byte report.
+
+    Fenced blocks count as content when they hold something; a fence with an
+    empty body is as blank as no fence at all.
+    """
+    text = reply or ""
+    for match in _FENCE.finditer(text):
+        if match.group(2).strip():
+            return False
+    outside = _FENCE.sub(" ", text)
+    return not _BACKTICK_RUN.sub(" ", outside).strip()
+
+
 def _snippet(raw, width=120):
     """A one-line excerpt of a bad block, so the failure can be diagnosed."""
     flat = " ".join((raw or "").split())

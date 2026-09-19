@@ -185,15 +185,63 @@ def eval_js(tab_id, expression):
         raise CliError("Unexpected reply from the page: " + raw[:200])
 
 
+
+WINDOW_STATE = os.path.join(os.path.expanduser("~"), ".chatgpt-agent", "windows.json")
+
+
+def _record_window(tab_id, window_id):
+    os.makedirs(os.path.dirname(WINDOW_STATE), exist_ok=True)
+    data = []
+    try:
+        with open(WINDOW_STATE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        pass
+    data.append({"tab_id": int(tab_id), "window_id": int(window_id), "created": time.time()})
+    tmp = WINDOW_STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, sort_keys=True)
+        handle.flush()
+    os.replace(tmp, WINDOW_STATE)
+
 def open_tab(url, timeout):
-    """Open `url` in a new Edge tab and return its stable id once loaded."""
-    tab_id = int(bridge("open", url))
+    """Open `url` in a private tool window and return its tab id."""
+    raw = bridge("open_window", url)
+    parts = raw.split("\t")
+    tab_id = int(parts[0])
+    if len(parts) > 1:
+        _record_window(tab_id, int(parts[1]))
     deadline = time.time() + timeout
     while time.time() < deadline:
         if bridge("loading", tab_id) == "done":
             return tab_id
         time.sleep(0.5)
     return tab_id
+
+
+def _load_windows():
+    try:
+        with open(WINDOW_STATE, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return []
+
+
+def cleanup_window(tab_id, url):
+    """Close only a recorded single-tab window that still proves ownership."""
+    kept = []
+    for item in _load_windows():
+        if int(item.get("tab_id", -1)) != int(tab_id):
+            kept.append(item)
+            continue
+        if claims.conversation_id(url) and bridge("close_window", item["window_id"], tab_id, claims.conversation_id(url)) == "ok":
+            continue
+        kept.append(item)
+    if kept != _load_windows():
+        tmp = WINDOW_STATE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(kept, handle, sort_keys=True)
+        os.replace(tmp, WINDOW_STATE)
 
 
 def ensure_tab(timeout):
@@ -516,6 +564,10 @@ def main(argv=None):
         return 130
 
     print(reply)
+    try:
+        cleanup_window(tab_id, current_url)
+    except Exception:
+        pass
     return 0
 
 

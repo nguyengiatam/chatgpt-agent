@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kernel-held ownership claims for ChatGPT tabs and conversations."""
+"""Kernel-held ownership claims for ChatGPT tabs, windows and conversations."""
 
 import fcntl
 import hashlib
@@ -128,6 +128,9 @@ class ClaimSet:
 
     def claim_tab(self, tab_id):
         self._keys.append(_acquire("tab", int(tab_id), self.owner))
+
+    def claim_window(self, window_id):
+        self._keys.append(_acquire("window", int(window_id), self.owner))
 
     def claim_conversation(self, identity):
         if identity:

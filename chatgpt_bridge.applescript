@@ -33,10 +33,12 @@ on run argv
 			end repeat
 			return out
 
-		else if theMode is "open" then
-			if (count of windows) is 0 then make new window
-			set tb to make new tab at end of tabs of window 1 with properties {URL:(item 2 of argv)}
-			return (id of tb) as text
+		else if theMode is "open" or theMode is "open_window" then
+			set nw to make new window
+			set bounds of nw to {1440, 720, 1920, 1080}
+			set URL of active tab of nw to (item 2 of argv)
+			if theMode is "open" then return (id of active tab of nw) as integer as text
+			return ((id of active tab of nw) as integer as text) & sep & ((id of nw) as integer as text)
 
 		else if theMode is "loading" then
 			set theId to (item 2 of argv) as integer
@@ -89,6 +91,23 @@ on run argv
 				end repeat
 			end repeat
 			error "tab not found: " & (theId as text)
+
+		else if theMode is "close_window" then
+			set winId to (item 2 of argv) as integer
+			set tabId to (item 3 of argv) as integer
+			set wantedUrl to item 4 of argv
+			repeat with win in windows
+				if ((id of win) as integer) is winId then
+					if (count of tabs of win) is 1 then
+						set tb to active tab of win
+						if ((id of tb) as integer) is tabId and (URL of tb contains wantedUrl) then
+							close win
+							return "ok"
+						end if
+					end if
+				end if
+			end repeat
+			return "no"
 		end if
 	end tell
 

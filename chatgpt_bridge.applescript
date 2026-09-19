@@ -35,7 +35,25 @@ on run argv
 
 		else if theMode is "open" or theMode is "open_window" then
 			set nw to make new window
-			set bounds of nw to {1440, 720, 1920, 1080}
+			set maxX to 1920
+			set maxY to 1080
+			try
+				tell application "Finder" to set desktopBounds to bounds of window of desktop
+				set maxX to item 3 of desktopBounds
+				set maxY to item 4 of desktopBounds
+			end try
+			-- NB: not `offset` - that is a term in Edge's dictionary (-10006).
+			set widthValue to 480
+			set heightValue to 360
+			set stepPx to 0
+			if (count of argv) >= 4 then
+				set widthValue to (item 3 of argv) as integer
+				set heightValue to (item 4 of argv) as integer
+			end if
+			if (count of argv) >= 6 then set stepPx to ((item 5 of argv) as integer) * ((item 6 of argv) as integer)
+			set rightEdge to maxX - stepPx
+			set bottomEdge to maxY - stepPx
+			set bounds of nw to {rightEdge - widthValue, bottomEdge - heightValue, rightEdge, bottomEdge}
 			set URL of active tab of nw to (item 2 of argv)
 			if theMode is "open" then return (id of active tab of nw) as integer as text
 			return ((id of active tab of nw) as integer as text) & sep & ((id of nw) as integer as text)

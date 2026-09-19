@@ -589,7 +589,7 @@ def track_conversation(tab_id, progress, held, args, log):
         save_session(args.session, url, tab_id)
 
 
-def resolve_session_tab(entry, timeout):
+def resolve_session_tab(entry, timeout, held=None):
     """Return a binding only if its tab still shows this exact conversation.
 
     A surviving tab id is insufficient: the user can drive that tab to another
@@ -602,12 +602,12 @@ def resolve_session_tab(entry, timeout):
         for _window, _index, tab_id, current_url in cgpt.parse_tabs(cgpt.bridge("list")):
             if tab_id == bound and _same_conversation(current_url, url):
                 return bound
-    return cgpt.open_tab(url, timeout)
+    return cgpt.open_tab(url, timeout, held)
 
 
 def _rebind_after_tab_gone(tab_id, url, held, args, log):
     """Reopen one vanished tab while retaining the conversation claim."""
-    replacement = cgpt.open_tab(url, args.timeout)
+    replacement = cgpt.open_tab(url, args.timeout, held)
     held.release_tab(tab_id)
     held.claim_tab(replacement)
     goto(replacement, url, args.timeout)
@@ -803,7 +803,7 @@ def run(args, log, progress):
         entry = load_sessions().get(args.session) if args.session else None
         if not entry or not _same_conversation(entry.get("url"), state["url"]):
             entry = {"url": state["url"]}
-        tab_id = resolve_session_tab(entry, args.timeout)
+        tab_id = resolve_session_tab(entry, args.timeout, held)
         held.claim_tab(tab_id)
         if args.focus:
             cgpt.bridge("focus", tab_id)
@@ -839,12 +839,12 @@ def run(args, log, progress):
         if saved:
             progress["url"] = saved
             held.claim_conversation(claims.conversation_id(saved))
-            tab_id = resolve_session_tab(saved_entry, args.timeout)
+            tab_id = resolve_session_tab(saved_entry, args.timeout, held)
             held.claim_tab(tab_id)
             goto(tab_id, saved, args.timeout)
             save_session(args.session, saved, tab_id)
         elif args.session:
-            tab_id = cgpt.open_tab(NEW_CHAT_URL, args.timeout)
+            tab_id = cgpt.open_tab(NEW_CHAT_URL, args.timeout, held)
             held.claim_tab(tab_id)
             goto(tab_id, NEW_CHAT_URL, args.timeout)
         else:
@@ -993,6 +993,10 @@ def run(args, log, progress):
             reply, tab_id = wait_with_tab_recovery(
                 tab_id, marker, progress.get("url"), held, args, recovery, log)
         clear_run(name)
+        try:
+            cgpt.cleanup_window(tab_id, progress.get("url") or "")
+        except Exception:
+            pass
         return reply
 
     log("round budget spent - asking for a conclusion")
@@ -1000,6 +1004,10 @@ def run(args, log, progress):
     answer, tab_id = wait_with_tab_recovery(
         tab_id, marker, progress.get("url"), held, args, recovery, log)
     clear_run(name)
+    try:
+        cgpt.cleanup_window(tab_id, progress.get("url") or "")
+    except Exception:
+        pass
     return answer
 
 

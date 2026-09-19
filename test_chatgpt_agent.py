@@ -564,7 +564,7 @@ class _FakeCgpt:
     def ensure_tab(self, timeout):
         return 101
 
-    def open_tab(self, url, timeout):
+    def open_tab(self, url, timeout, held=None):
         return 101
 
     def bridge(self, *a):
@@ -892,7 +892,7 @@ class SessionBindingSelectionTest(unittest.TestCase):
                 raise AssertionError(args)
             def parse_tabs(self, raw):
                 return self._cgpt.parse_tabs(raw)
-            def open_tab(self, url, timeout):
+            def open_tab(self, url, timeout, held=None):
                 self.opened.append((url, timeout))
                 return opened
         browser = Browser()
@@ -974,7 +974,7 @@ class TabGoneRecoveryTest(unittest.TestCase):
                 raise AssertionError(args)
             def parse_tabs(self, raw):
                 return [(1, 1, 101, "https://chatgpt.com/c/original")]
-            def open_tab(self, url, timeout):
+            def open_tab(self, url, timeout, held=None):
                 self.opened.append(url)
                 return 202
             def needs_attachment(self, message): return False
@@ -1029,7 +1029,7 @@ class WaitRecoveryHelperTest(unittest.TestCase):
             class TabGone(CliError): pass
             def __init__(self):
                 self.waits = []
-            def open_tab(self, url, timeout): return 22
+            def open_tab(self, url, timeout, held=None): return 22
             def wait_for_reply(self, tab_id, marker, timeout, poll):
                 self.waits.append(tab_id)
                 raise self.TabGone("gone")

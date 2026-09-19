@@ -15,7 +15,9 @@ import argparse
 import atexit
 import json
 import os
+import fcntl
 import subprocess
+import tempfile
 import sys
 import time
 import uuid
@@ -187,36 +189,69 @@ def eval_js(tab_id, expression):
 
 
 WINDOW_STATE = os.path.join(os.path.expanduser("~"), ".chatgpt-agent", "windows.json")
+WINDOW_STATE_LOCK = WINDOW_STATE + ".lock"
+DEFAULT_SCREEN_BOUNDS = (1920, 1080)
+WINDOW_SIZE = (480, 360)
+# Each concurrent tool window sits this far up and left of the previous one, so
+# none of them covers another completely (macOS throttles fully covered windows).
+WINDOW_CASCADE_PX = 40
+
+
+def _window_lock():
+    os.makedirs(os.path.dirname(WINDOW_STATE), exist_ok=True)
+    handle = open(WINDOW_STATE_LOCK, "a+")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def _window_write(data):
+    fd, tmp = tempfile.mkstemp(prefix="windows.", dir=os.path.dirname(WINDOW_STATE))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, sort_keys=True)
+            handle.flush()
+        os.replace(tmp, WINDOW_STATE)
+    finally:
+        try: os.unlink(tmp)
+        except OSError: pass
 
 
 def _record_window(tab_id, window_id):
-    os.makedirs(os.path.dirname(WINDOW_STATE), exist_ok=True)
-    data = []
+    lock = _window_lock()
     try:
-        with open(WINDOW_STATE, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        pass
-    data.append({"tab_id": int(tab_id), "window_id": int(window_id), "created": time.time()})
-    tmp = WINDOW_STATE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, sort_keys=True)
-        handle.flush()
-    os.replace(tmp, WINDOW_STATE)
+        data = _load_windows()
+        data.append({"tab_id": int(tab_id), "window_id": int(window_id), "created": time.time()})
+        _window_write(data)
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
 
-def open_tab(url, timeout):
+def open_tab(url, timeout, held=None):
     """Open `url` in a private tool window and return its tab id."""
-    raw = bridge("open_window", url)
+    raw = bridge("open_window", url, str(WINDOW_SIZE[0]), str(WINDOW_SIZE[1]),
+                 str(_live_window_count()), str(WINDOW_CASCADE_PX))
     parts = raw.split("\t")
     tab_id = int(parts[0])
     if len(parts) > 1:
-        _record_window(tab_id, int(parts[1]))
+        window_id = int(parts[1])
+        if held:
+            held.claim_window(window_id)
+        _record_window(tab_id, window_id)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if bridge("loading", tab_id) == "done":
             return tab_id
         time.sleep(0.5)
     return tab_id
+
+
+def _live_window_count():
+    """How many recorded tool windows still have their tab open (cascade index)."""
+    try:
+        live = {tab_id for _w, _i, tab_id, _u in parse_tabs(bridge("list"))}
+    except Exception:
+        return 0
+    return sum(1 for item in _load_windows() if int(item.get("tab_id", -1)) in live)
 
 
 def _load_windows():
@@ -229,27 +264,30 @@ def _load_windows():
 
 def cleanup_window(tab_id, url):
     """Close only a recorded single-tab window that still proves ownership."""
-    kept = []
-    for item in _load_windows():
-        if int(item.get("tab_id", -1)) != int(tab_id):
+    lock = _window_lock()
+    try:
+        current = _load_windows()
+        kept = []
+        for item in current:
+            if int(item.get("tab_id", -1)) != int(tab_id):
+                kept.append(item)
+                continue
+            if claims.conversation_id(url) and bridge("close_window", item["window_id"], tab_id, claims.conversation_id(url)) == "ok":
+                continue
             kept.append(item)
-            continue
-        if claims.conversation_id(url) and bridge("close_window", item["window_id"], tab_id, claims.conversation_id(url)) == "ok":
-            continue
-        kept.append(item)
-    if kept != _load_windows():
-        tmp = WINDOW_STATE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(kept, handle, sort_keys=True)
-        os.replace(tmp, WINDOW_STATE)
+        if kept != current:
+            _window_write(kept)
+    finally:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
 
 
-def ensure_tab(timeout):
+def ensure_tab(timeout, held=None):
     """Find the open ChatGPT tab, or open one and wait for it to load."""
     found = find_chatgpt_tab(parse_tabs(bridge("list")))
     if found:
         return found
-    return open_tab(CHATGPT_URL, timeout)
+    return open_tab(CHATGPT_URL, timeout, held)
 
 
 def claim_one_shot_tab(held, timeout):
@@ -291,7 +329,7 @@ def claim_one_shot_tab(held, timeout):
         if claim_candidate(tab_id, url):
             return tab_id
 
-    tab_id = open_tab(CHATGPT_URL, timeout)
+    tab_id = open_tab(CHATGPT_URL, timeout, held)
     held.claim_tab(tab_id)
     return tab_id
 

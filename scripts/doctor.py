@@ -96,7 +96,7 @@ def check_apple_events_js(tab):
         c.detail = "skipped - no tab to test on"
         return c
     try:
-        value = cgpt.bridge("eval", "1+1", tab[0], tab[1])
+        value = cgpt.bridge("eval", "1+1", tab)
         c.ok = value.strip() == "2"
         c.detail = "enabled" if c.ok else "unexpected reply " + repr(value[:40])
     except cgpt.CliError as exc:
@@ -114,7 +114,7 @@ def check_chatgpt_tab():
         return c, None
     found = cgpt.find_chatgpt_tab(tabs)
     c.ok = found is not None
-    c.detail = "window " + str(found[0]) + " tab " + str(found[1]) if found else "none"
+    c.detail = ("tab " + str(found)) if found is not None else "none"
     c.fix = "Open https://chatgpt.com/ in Edge. The tool will also open one\nitself, but signing in has to happen by hand."
     return c, found
 
@@ -125,7 +125,7 @@ def check_signed_in(tab):
         c.detail = "skipped - no ChatGPT tab"
         return c
     try:
-        probe = cgpt.eval_js(tab[0], tab[1], "CGPT.probe()")
+        probe = cgpt.eval_js(tab, "CGPT.probe()")
         c.ok = bool(probe.get("ok"))
         c.detail = "composer ready" if c.ok else str(probe.get("error"))
     except cgpt.CliError as exc:

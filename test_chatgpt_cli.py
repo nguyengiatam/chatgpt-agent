@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -692,3 +693,212 @@ class OneShotPostSendConversationClaimTest(unittest.TestCase):
             cgpt.claims.ClaimSet = real_claim_set
             for name, value in saved.items():
                 setattr(cgpt, name, value)
+
+
+class ToolWindowTest(unittest.TestCase):
+    """P7: every run works in a small corner window it owns and records.
+
+    The registry is what tells a later run - or the same run at cleanup time -
+    which windows the tool opened and which belong to the person using Edge. A
+    window missing from it is a user window forever after, so recording it is
+    part of opening it, and forgetting it is part of closing it.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.saved = (cgpt.WINDOW_STATE, cgpt.WINDOW_STATE_LOCK, cgpt.bridge)
+        cgpt.WINDOW_STATE = os.path.join(self.dir, "windows.json")
+        cgpt.WINDOW_STATE_LOCK = cgpt.WINDOW_STATE + ".lock"
+        self.calls = []
+
+    def tearDown(self):
+        cgpt.WINDOW_STATE, cgpt.WINDOW_STATE_LOCK, cgpt.bridge = self.saved
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _bridge(self, replies):
+        def bridge(*args):
+            self.calls.append(args)
+            reply = replies.get(args[0])
+            if isinstance(reply, Exception):
+                raise reply
+            if reply is None:
+                raise AssertionError("unexpected bridge call: " + repr(args))
+            return reply
+        cgpt.bridge = bridge
+
+    def _windows(self):
+        with open(cgpt.WINDOW_STATE, encoding="utf-8") as handle:
+            return json.load(handle)
+
+
+class WindowRegistryTest(ToolWindowTest):
+    def test_an_absent_registry_reads_as_empty(self):
+        self.assertEqual(cgpt._load_windows(), [])
+
+    def test_a_corrupt_registry_does_not_crash_a_run(self):
+        with open(cgpt.WINDOW_STATE, "w", encoding="utf-8") as handle:
+            handle.write("{ truncated")
+        self.assertEqual(cgpt._load_windows(), [])
+
+    def test_a_recorded_window_round_trips_as_numbers(self):
+        cgpt._record_window("707", "12")
+        stored = self._windows()
+        self.assertEqual(stored[0]["tab_id"], 707)
+        self.assertEqual(stored[0]["window_id"], 12)
+
+    def test_recording_keeps_the_windows_already_there(self):
+        cgpt._record_window(707, 12)
+        cgpt._record_window(808, 13)
+        self.assertEqual([item["tab_id"] for item in self._windows()], [707, 808])
+
+
+class CascadeIndexTest(ToolWindowTest):
+    """The cascade step counts the tool's own live windows, not Edge's.
+
+    Counting every Edge window walks a run's window off the screen as soon as
+    the person has a few of their own open; counting records that are already
+    closed does the same over a long day. Only live tool windows may shift it.
+    """
+
+    def test_only_recorded_windows_whose_tab_is_still_open_are_counted(self):
+        cgpt._record_window(707, 12)
+        cgpt._record_window(808, 13)
+        self._bridge({"list": "1\t1\t707\thttps://chatgpt.com/c/one"})
+        self.assertEqual(cgpt._live_window_count(), 1)
+
+    def test_the_persons_own_windows_never_shift_the_cascade(self):
+        self._bridge({"list": "1\t1\t900\thttps://example.com\n1\t2\t901\thttps://chatgpt.com/"})
+        self.assertEqual(cgpt._live_window_count(), 0)
+
+    def test_a_browser_that_cannot_be_asked_means_no_cascade(self):
+        cgpt._record_window(707, 12)
+        self._bridge({"list": cgpt.CliError("Edge is not running")})
+        self.assertEqual(cgpt._live_window_count(), 0)
+
+
+class OpenToolWindowTest(ToolWindowTest):
+    def test_the_window_is_asked_for_small_and_cascaded(self):
+        self._bridge({"list": "", "open_window": "707\t12", "loading": "done"})
+        self.assertEqual(cgpt.open_tab("https://chatgpt.com/", 5), 707)
+        opened = [call for call in self.calls if call[0] == "open_window"]
+        self.assertEqual(
+            opened,
+            [("open_window", "https://chatgpt.com/", "480", "360", "0", "40")],
+        )
+
+    def test_the_second_window_of_a_run_is_cascaded_one_step(self):
+        cgpt._record_window(707, 12)
+        self._bridge({"list": "1\t1\t707\thttps://chatgpt.com/c/one",
+                      "open_window": "808\t13", "loading": "done"})
+        cgpt.open_tab("https://chatgpt.com/", 5)
+        opened = [call for call in self.calls if call[0] == "open_window"][0]
+        self.assertEqual(opened[4], "1")
+
+    def test_the_window_is_claimed_and_recorded(self):
+        events = []
+
+        class Held:
+            def claim_window(self, window_id):
+                events.append(window_id)
+
+        self._bridge({"list": "", "open_window": "707\t12", "loading": "done"})
+        cgpt.open_tab("https://chatgpt.com/", 5, Held())
+        self.assertEqual(events, [12])
+        self.assertEqual(self._windows()[0]["window_id"], 12)
+
+    def test_a_window_that_cannot_be_claimed_is_never_recorded(self):
+        """W0: lose the race, leave nothing behind for a later run to close."""
+        class Held:
+            def claim_window(self, window_id):
+                raise cgpt.claims.ClaimBusy("window 12 is already claimed")
+
+        self._bridge({"list": "", "open_window": "707\t12", "loading": "done"})
+        with self.assertRaises(cgpt.claims.ClaimBusy):
+            cgpt.open_tab("https://chatgpt.com/", 5, Held())
+        self.assertEqual(cgpt._load_windows(), [])
+
+    def test_a_bridge_that_reports_no_window_records_nothing(self):
+        self._bridge({"list": "", "open_window": "707", "loading": "done"})
+        self.assertEqual(cgpt.open_tab("https://chatgpt.com/", 5), 707)
+        self.assertEqual(cgpt._load_windows(), [])
+
+
+class CleanupWindowTest(ToolWindowTest):
+    """W4: close only a window the tool still proves is its own, single tab.
+
+    Everything here is one half of a pair with the AppleScript `close_window`,
+    which re-checks the window holds exactly that one tab on that conversation
+    at the instant of closing. Python decides *whether to ask*; AppleScript
+    decides whether it is still true.
+    """
+
+    def test_a_closed_window_is_forgotten(self):
+        cgpt._record_window(707, 12)
+        self._bridge({"close_window": "ok"})
+        cgpt.cleanup_window(707, "https://chatgpt.com/c/abc123")
+        self.assertEqual(self.calls, [("close_window", 12, 707, "abc123")])
+        self.assertEqual(cgpt._load_windows(), [])
+
+    def test_a_refused_close_keeps_the_record_so_resume_can_reclaim_it(self):
+        cgpt._record_window(707, 12)
+        self._bridge({"close_window": "no"})
+        cgpt.cleanup_window(707, "https://chatgpt.com/c/abc123")
+        self.assertEqual([item["tab_id"] for item in self._windows()], [707])
+
+    def test_without_a_conversation_id_nothing_is_closed(self):
+        cgpt._record_window(707, 12)
+        self._bridge({})
+        cgpt.cleanup_window(707, "")
+        self.assertEqual(self.calls, [])
+        self.assertEqual([item["tab_id"] for item in self._windows()], [707])
+
+    def test_a_tab_the_tool_never_opened_is_left_alone(self):
+        self._bridge({})
+        cgpt.cleanup_window(707, "https://chatgpt.com/c/abc123")
+        self.assertEqual(self.calls, [])
+
+    def test_another_runs_window_is_neither_closed_nor_forgotten(self):
+        cgpt._record_window(707, 12)
+        cgpt._record_window(808, 13)
+        self._bridge({"close_window": "ok"})
+        cgpt.cleanup_window(707, "https://chatgpt.com/c/abc123")
+        self.assertEqual([call[1] for call in self.calls], [12])
+        self.assertEqual([item["tab_id"] for item in self._windows()], [808])
+
+
+class WindowRegistryConcurrencyTest(unittest.TestCase):
+    """Parallel runs each record a window. All of them must survive.
+
+    Read-modify-write on one shared file loses every update but the last, and
+    a lost record is a window nobody will ever close - it stays on the person's
+    screen after the run that opened it is gone.
+    """
+
+    def test_parallel_writers_all_survive(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        env = os.environ.copy()
+        env["HOME"] = home.name
+
+        writer = (
+            "import importlib.util, os, sys\n"
+            "spec = importlib.util.spec_from_file_location('cgpt',"
+            " os.path.join(sys.argv[1], 'chatgpt-cli.py'))\n"
+            "cgpt = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(cgpt)\n"
+            "cgpt._record_window(int(sys.argv[2]), int(sys.argv[2]) + 1000)\n"
+        )
+        writers = [
+            subprocess.Popen([sys.executable, "-c", writer, _HERE, str(700 + i)],
+                             env=env, text=True,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for i in range(12)
+        ]
+        for proc in writers:
+            _, err = proc.communicate(timeout=60)
+            self.assertEqual(proc.returncode, 0, err)
+
+        with open(os.path.join(home.name, ".chatgpt-agent", "windows.json")) as handle:
+            stored = json.load(handle)
+        self.assertEqual(sorted(item["tab_id"] for item in stored),
+                         [700 + i for i in range(12)])

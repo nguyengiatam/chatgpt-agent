@@ -1136,3 +1136,151 @@ class ConversationIdSettlesLateTest(unittest.TestCase):
                       "the settled conversation was never claimed")
         self.assertIn(placeholder, agent.claims._HELD,
                       "the placeholder was expected to have been claimed first")
+
+
+class ToolWindowLifecycleTest(unittest.TestCase):
+    """P7: a run opens a window of its own, and closes it only when it wins.
+
+    W0 says a run must hold every claim it needs before it touches Edge at all,
+    so a run that loses the race leaves no stray window behind. W4 says the
+    window it did open is closed when the run finishes normally, and left alone
+    otherwise - an interrupted run's window is how `--resume` finds its way back.
+    """
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self.saved = (agent.STATE_DIR, agent.SESSIONS, agent.SESSIONS_LOCK, agent.RUNS_DIR,
+                      agent.cgpt, agent.goto, agent.claims.ClaimSet)
+        agent.STATE_DIR = self.dir
+        agent.SESSIONS = os.path.join(self.dir, "sessions.json")
+        agent.SESSIONS_LOCK = os.path.join(self.dir, "sessions.lock")
+        agent.RUNS_DIR = os.path.join(self.dir, "runs")
+        agent.goto = lambda *a, **k: None
+
+    def tearDown(self):
+        (agent.STATE_DIR, agent.SESSIONS, agent.SESSIONS_LOCK, agent.RUNS_DIR,
+         agent.cgpt, agent.goto, agent.claims.ClaimSet) = self.saved
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _args(self, **overrides):
+        args = argparse.Namespace(workspace=self.dir, preset="review", task="t", session="app",
+                                  new=False, resume=False, write=False, allow_shell=False,
+                                  focus=False, max_rounds=2, max_chars=1000, round_chars=500,
+                                  timeout=1, poll=0, retries=1)
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def _install_claims(self, busy_on=None):
+        class Claims:
+            def __init__(self, owner):
+                pass
+            def claim_tab(self, tab_id):
+                if busy_on == "tab":
+                    raise agent.claims.ClaimBusy("tab is claimed")
+            def release_tab(self, tab_id):
+                pass
+            def claim_window(self, window_id):
+                pass
+            def claim_conversation(self, identity):
+                if busy_on == "conversation":
+                    raise agent.claims.ClaimBusy("conversation is claimed")
+            def close(self):
+                pass
+        agent.claims.ClaimSet = Claims
+
+    def _install_browser(self, never_replies=False):
+        outer = self
+
+        class Browser:
+            class CliError(RuntimeError): pass
+            class TabGone(CliError): pass
+
+            def __init__(self):
+                self.calls = []
+                self.cleaned = []
+
+            def bridge(self, *args):
+                self.calls.append(args)
+                if args[0] == "list":
+                    return "1\t1\t101\thttps://chatgpt.com/c/original"
+                return "ok"
+
+            def parse_tabs(self, raw):
+                return [(1, 1, 101, "https://chatgpt.com/c/original")]
+
+            def open_tab(self, url, timeout, held=None):
+                self.calls.append(("open_tab", url))
+                return 202
+
+            def needs_attachment(self, message):
+                return False
+
+            def send(self, tab_id, message):
+                self.calls.append(("send", tab_id))
+                return "marker-1"
+
+            def wait_for_reply(self, tab_id, marker, timeout, poll):
+                self.calls.append(("wait", tab_id))
+                if never_replies:
+                    raise self.TabGone("gone")
+                return "done"
+
+            def eval_js(self, tab_id, expr):
+                return "https://chatgpt.com/c/original"
+
+            def ensure_tab(self, timeout):
+                self.calls.append(("ensure_tab",))
+                return 101
+
+            def find_chatgpt_tab(self, tabs):
+                return 101
+
+            def cleanup_window(self, tab_id, url):
+                self.cleaned.append((tab_id, url))
+
+        agent.cgpt = Browser()
+        agent.write_sessions({"app": {"url": "https://chatgpt.com/c/original", "tab_id": 101,
+                                      "updated": agent._now_stamp()}})
+        return agent.cgpt
+
+    def test_a_finished_run_closes_the_window_it_opened(self):
+        self._install_claims()
+        browser = self._install_browser()
+        self.assertEqual(agent.run(self._args(), lambda line: None, {}), "done")
+        self.assertEqual(browser.cleaned, [(101, "https://chatgpt.com/c/original")])
+
+    def test_an_interrupted_run_leaves_its_window_for_resume(self):
+        self._install_claims()
+        browser = self._install_browser(never_replies=True)
+        with self.assertRaises(Exception):
+            agent.run(self._args(), lambda line: None, {})
+        self.assertEqual(browser.cleaned, [])
+
+    def test_losing_the_conversation_race_touches_no_browser(self):
+        self._install_claims(busy_on="conversation")
+        browser = self._install_browser()
+        agent.save_run("app", {"root": self.dir, "round": 1, "spent": 0,
+                               "url": "https://chatgpt.com/c/original"})
+        with self.assertRaises(agent.claims.ClaimBusy):
+            agent.run(self._args(resume=True), lambda line: None, {})
+        self.assertEqual(browser.calls, [])
+        self.assertEqual(browser.cleaned, [])
+
+    def test_finish_run_drops_the_checkpoint_and_closes_the_window(self):
+        self._install_claims()
+        browser = self._install_browser()
+        agent.save_run("app", {"root": self.dir, "round": 3, "spent": 0,
+                               "url": "https://chatgpt.com/c/original"})
+        agent.finish_run("app", 202, {"url": "https://chatgpt.com/c/original"})
+        self.assertIsNone(agent.load_run("app"))
+        self.assertEqual(browser.cleaned, [(202, "https://chatgpt.com/c/original")])
+
+    def test_a_window_that_will_not_close_does_not_fail_a_finished_run(self):
+        self._install_claims()
+        browser = self._install_browser()
+
+        def refuse(tab_id, url):
+            raise browser.CliError("Edge is not responding")
+        browser.cleanup_window = refuse
+        agent.finish_run("app", 202, {"url": "https://chatgpt.com/c/original"})

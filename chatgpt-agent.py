@@ -402,6 +402,21 @@ def clear_run(name):
         pass
 
 
+def finish_run(name, tab_id, progress):
+    """End a run that reached an answer: drop the checkpoint, close the window.
+
+    Every normal exit goes through here. The first version closed the window on
+    the two budget-exhausted paths only, so the path every review actually takes
+    - a final reply with no c2c block - left its small corner window on screen
+    for the person to close by hand, once per run.
+    """
+    clear_run(name)
+    try:
+        cgpt.cleanup_window(tab_id, progress.get("url") or "")
+    except Exception:
+        pass  # W4: any doubt about the window means leave it alone
+
+
 # --- pruning ---------------------------------------------------------------
 #
 # Both stores are append-only in normal use: clear_run() fires when a run ends
@@ -928,7 +943,7 @@ def run(args, log, progress):
                     + str(MAX_BAD_FORMAT) + ", asking again")
                 message, reply = EMPTY_REPLY, None
                 continue
-            clear_run(name)
+            finish_run(name, tab_id, progress)
             return reply
 
         bad_format = 0
@@ -992,22 +1007,14 @@ def run(args, log, progress):
                 tab_id, proto.format_results(results) + "\n\n" + LANDED))
             reply, tab_id = wait_with_tab_recovery(
                 tab_id, marker, progress.get("url"), held, args, recovery, log)
-        clear_run(name)
-        try:
-            cgpt.cleanup_window(tab_id, progress.get("url") or "")
-        except Exception:
-            pass
+        finish_run(name, tab_id, progress)
         return reply
 
     log("round budget spent - asking for a conclusion")
     marker = attempt("send", args.retries, log, lambda: cgpt.send(tab_id, BUDGET_SPENT))
     answer, tab_id = wait_with_tab_recovery(
         tab_id, marker, progress.get("url"), held, args, recovery, log)
-    clear_run(name)
-    try:
-        cgpt.cleanup_window(tab_id, progress.get("url") or "")
-    except Exception:
-        pass
+    finish_run(name, tab_id, progress)
     return answer
 
 

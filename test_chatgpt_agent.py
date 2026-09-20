@@ -561,10 +561,16 @@ class _FakeCgpt:
         self.replies = list(replies)
         self.sent = []
 
+    # Both of these take the tab claim, because the real ones do: ownership is
+    # part of opening or adopting a tab, not something the caller adds after.
     def ensure_tab(self, timeout, held=None):
+        if held:
+            held.claim_tab(101)
         return 101
 
     def open_tab(self, url, timeout, held=None):
+        if held:
+            held.claim_tab(101)
         return 101
 
     def bridge(self, *a):
@@ -807,6 +813,44 @@ class ClaimSpansTheRunTest(unittest.TestCase):
         out, err = proc.communicate(timeout=30)
         return proc.returncode, out, err
 
+    def test_a_vanished_tab_is_really_let_go_when_the_run_rebinds(self):
+        """After a rebind, a rival process must be able to take the dead tab.
+
+        open_tab() takes the tab claim itself. A caller that claims it again
+        pushes the reference count to two, and the single release in
+        _rebind_after_tab_gone() only brings it back to one: the kernel lock
+        stays held, and rivals are refused a tab that no longer exists.
+        """
+        class Cgpt(_FakeCgpt):
+            TabGone = type("TabGone", (RuntimeError,), {})
+
+            def __init__(self, replies):
+                _FakeCgpt.__init__(self, replies)
+                self.gone = False
+
+            def open_tab(self, url, timeout, held=None):
+                if held:
+                    held.claim_tab(202)
+                return 202
+
+            def wait_for_reply(self, tab_id, marker, timeout, poll):
+                if not self.gone:
+                    self.gone = True
+                    raise self.TabGone("gone")
+                return _FakeCgpt.wait_for_reply(self, tab_id, marker, timeout, poll)
+
+        agent.cgpt = Cgpt(["nothing to report."])
+        args = argparse.Namespace(
+            workspace=self.dir, preset="review", task="t", session=None, new=True,
+            resume=False, write=False, allow_shell=False, focus=False,
+            max_rounds=4, max_chars=1000, round_chars=500, timeout=1, poll=0,
+            retries=1,
+        )
+        agent.run(args, lambda line: None, {})
+        code, out, err = self._rival_verdict(101)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("acquired", out)
+
     def test_a_rival_is_refused_while_the_owner_waits_between_rounds(self):
         verdicts = []
         outer = self
@@ -992,6 +1036,8 @@ class TabGoneRecoveryTest(unittest.TestCase):
                 return [(1, 1, 101, "https://chatgpt.com/c/original")]
             def open_tab(self, url, timeout, held=None):
                 self.opened.append(url)
+                if held:
+                    held.claim_tab(202)
                 return 202
             def needs_attachment(self, message): return False
             def send(self, tab_id, message):
@@ -1010,8 +1056,6 @@ class TabGoneRecoveryTest(unittest.TestCase):
                 return 101
             def claim_reusable_tab(self, tab_id, held):
                 return True
-            def find_chatgpt_tab(self, tabs):
-                return 101
         agent.cgpt = Browser()
         agent.write_sessions({"app": {"url": "https://chatgpt.com/c/original", "tab_id": 101,
                                       "updated": agent._now_stamp()}})
@@ -1047,7 +1091,10 @@ class WaitRecoveryHelperTest(unittest.TestCase):
             class TabGone(CliError): pass
             def __init__(self):
                 self.waits = []
-            def open_tab(self, url, timeout, held=None): return 22
+            def open_tab(self, url, timeout, held=None):
+                if held:
+                    held.claim_tab(22)
+                return 22
             def wait_for_reply(self, tab_id, marker, timeout, poll):
                 self.waits.append(tab_id)
                 raise self.TabGone("gone")
@@ -1065,7 +1112,9 @@ class WaitRecoveryHelperTest(unittest.TestCase):
                                          held, args, recovery, lambda line: None)
         self.assertIn("https://chatgpt.com/c/abc", str(caught.exception))
         self.assertEqual(agent.cgpt.waits, [11, 22])
-        self.assertEqual(held.events, [("release", 11), ("claim", 22)])
+        # The replacement is claimed as part of opening it, and only then is the
+        # vanished tab let go - never the other way round.
+        self.assertEqual(held.events, [("claim", 22), ("release", 11)])
         self.assertTrue(recovery["used"])
 
 
@@ -1253,9 +1302,6 @@ class ToolWindowLifecycleTest(unittest.TestCase):
 
             def ensure_tab(self, timeout, held=None):
                 self.calls.append(("ensure_tab",))
-                return 101
-
-            def find_chatgpt_tab(self, tabs):
                 return 101
 
             def cleanup_window(self, tab_id, url):

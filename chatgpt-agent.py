@@ -622,10 +622,14 @@ def resolve_session_tab(entry, timeout, held=None):
 
 
 def _rebind_after_tab_gone(tab_id, url, held, args, log):
-    """Reopen one vanished tab while retaining the conversation claim."""
+    """Reopen one vanished tab while retaining the conversation claim.
+
+    open_tab() takes the tab claim as part of opening the window, so nothing
+    here claims it a second time: a tab claimed twice survives the single
+    release below, and the run would go on holding a tab that no longer exists.
+    """
     replacement = cgpt.open_tab(url, args.timeout, held)
     held.release_tab(tab_id)
-    held.claim_tab(replacement)
     goto(replacement, url, args.timeout)
     if args.focus:
         cgpt.bridge("focus", replacement)
@@ -820,7 +824,6 @@ def run(args, log, progress):
         if not entry or not _same_conversation(entry.get("url"), state["url"]):
             entry = {"url": state["url"]}
         tab_id = resolve_session_tab(entry, args.timeout, held)
-        held.claim_tab(tab_id)
         if args.focus:
             cgpt.bridge("focus", tab_id)
         goto(tab_id, state["url"], args.timeout)
@@ -856,16 +859,13 @@ def run(args, log, progress):
             progress["url"] = saved
             held.claim_conversation(claims.conversation_id(saved))
             tab_id = resolve_session_tab(saved_entry, args.timeout, held)
-            held.claim_tab(tab_id)
             goto(tab_id, saved, args.timeout)
             save_session(args.session, saved, tab_id)
         elif args.session:
             tab_id = cgpt.open_tab(NEW_CHAT_URL, args.timeout, held)
-            held.claim_tab(tab_id)
             goto(tab_id, NEW_CHAT_URL, args.timeout)
         else:
             tab_id = cgpt.ensure_tab(args.timeout, held)
-            held.claim_tab(tab_id)
             goto(tab_id, NEW_CHAT_URL, args.timeout)
 
         if args.focus:

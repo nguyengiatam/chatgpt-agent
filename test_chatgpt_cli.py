@@ -99,30 +99,26 @@ class ParseTabsTest(unittest.TestCase):
         self.assertEqual(cgpt.parse_tabs(""), [])
 
 
-class FindChatgptTabTest(unittest.TestCase):
-    """find_chatgpt_tab() must match on host, not on a substring of the URL."""
+class IsChatgptUrlTest(unittest.TestCase):
+    """is_chatgpt_url() must match on host, not on a substring of the URL."""
 
-    def test_finds_chatgpt_com(self):
-        tabs = [(1, 1, 101, "https://news.example.com/"), (1, 2, 202, "https://chatgpt.com/c/abc")]
-        self.assertEqual(cgpt.find_chatgpt_tab(tabs), 202)
+    def test_matches_chatgpt_com(self):
+        self.assertTrue(cgpt.is_chatgpt_url("https://chatgpt.com/c/abc"))
 
-    def test_finds_legacy_chat_openai_com(self):
-        tabs = [(2, 5, 505, "https://chat.openai.com/c/xyz")]
-        self.assertEqual(cgpt.find_chatgpt_tab(tabs), 505)
+    def test_matches_legacy_chat_openai_com(self):
+        self.assertTrue(cgpt.is_chatgpt_url("https://chat.openai.com/c/xyz"))
 
-    def test_returns_first_match_so_conversation_is_reused(self):
-        tabs = [(1, 1, 101, "https://chatgpt.com/c/first"), (1, 2, 202, "https://chatgpt.com/c/second")]
-        self.assertEqual(cgpt.find_chatgpt_tab(tabs), 101)
-
-    def test_returns_none_when_no_chatgpt_tab(self):
-        self.assertIsNone(cgpt.find_chatgpt_tab([(1, 1, 101, "https://example.com/")]))
+    def test_rejects_an_unrelated_host(self):
+        self.assertFalse(cgpt.is_chatgpt_url("https://example.com/"))
 
     def test_does_not_match_other_host_mentioning_chatgpt_in_query(self):
-        tabs = [(1, 1, 101, "https://evil.example.com/?redirect=https://chatgpt.com/")]
-        self.assertIsNone(cgpt.find_chatgpt_tab(tabs))
+        self.assertFalse(cgpt.is_chatgpt_url("https://evil.example.com/?redirect=https://chatgpt.com/"))
 
     def test_does_not_match_lookalike_host(self):
-        self.assertIsNone(cgpt.find_chatgpt_tab([(1, 1, 101, "https://notchatgpt.com/")]))
+        self.assertFalse(cgpt.is_chatgpt_url("https://notchatgpt.com/"))
+
+    def test_an_unparsable_url_is_not_ours(self):
+        self.assertFalse(cgpt.is_chatgpt_url("http://["))
 
 
 class StabilityTrackerTest(unittest.TestCase):
@@ -917,6 +913,18 @@ class ReusableToolTabTest(ToolWindowTest):
         self.assertFalse(cgpt.claim_reusable_tab(707, self.Held()))
         self._assert_no_use()
 
+    def test_a_tab_that_moved_to_another_window_is_not_reused(self):
+        """Edge hands out tab ids again after a window closes.
+
+        The registry says which window the tool opened this tab in. A tab that
+        now answers from a different window is either a recycled id or a tab the
+        person dragged out - either way the record no longer describes it.
+        """
+        self._record()
+        self._bridge({"tab_state": self._state(window_id=99)})
+        self.assertFalse(cgpt.claim_reusable_tab(707, self.Held()))
+        self._assert_no_use()
+
     def test_a_tab_whose_claim_is_busy_is_not_reused(self):
         self._record()
         self._bridge({"tab_state": self._state()})
@@ -986,8 +994,10 @@ class ParseTabStateTest(unittest.TestCase):
         )
 
     def test_bad_or_missing_fields_are_rejected_without_an_exception(self):
+        # The fourth row is the dangerous one: four well-formed fields and no
+        # URL reads as valid right up to the moment the URL is indexed.
         for raw in ("", "12\t1\t1", "x\t1\t1\t0\thttps://chatgpt.com/",
-                    "12\t1\tyes\t0\thttps://chatgpt.com/"):
+                    "12\t1\tyes\t0\thttps://chatgpt.com/", "12\t1\t1\t0"):
             self.assertIsNone(cgpt.parse_tab_state(raw), raw)
 
 

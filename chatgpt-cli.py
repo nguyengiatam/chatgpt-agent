@@ -88,20 +88,18 @@ def parse_tabs(raw):
     return tabs
 
 
-def find_chatgpt_tab(tabs):
-    """First stable tab id whose *host* is ChatGPT, or None.
+def is_chatgpt_url(url):
+    """True when `url`'s *host* is ChatGPT.
 
     Matching on host rather than on a substring keeps an unrelated page that
-    merely mentions chatgpt.com in its query string from being hijacked.
+    merely mentions chatgpt.com in its query string from being mistaken for one
+    of ours.
     """
-    for _window_index, _tab_index, tab_id, url in tabs:
-        try:
-            host = urlsplit(url).hostname
-        except ValueError:
-            continue
-        if host and host.lower() in CHATGPT_HOSTS:
-            return tab_id
-    return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    return bool(host) and host.lower() in CHATGPT_HOSTS
 
 
 def parse_tab_state(raw):
@@ -348,12 +346,7 @@ def claim_reusable_tab(tab_id, held):
 def ensure_tab(timeout, held=None):
     """Reuse only a proved tool tab; every other ChatGPT tab is the user's."""
     for _window_index, _tab_index, tab_id, url in parse_tabs(bridge("list")):
-        try:
-            host = urlsplit(url).hostname
-        except ValueError:
-            continue
-        if (host and host.lower() in CHATGPT_HOSTS
-                and claim_reusable_tab(tab_id, held)):
+        if is_chatgpt_url(url) and claim_reusable_tab(tab_id, held):
             return tab_id
     return open_tab(CHATGPT_URL, timeout, held)
 

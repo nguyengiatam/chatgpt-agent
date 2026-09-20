@@ -248,6 +248,17 @@ class BridgeIntegrationTest(unittest.TestCase):
         _, _, tab_id, _ = tabs[0]
         self.assertIn(cgpt.bridge("loading", tab_id), ("loading", "done"))
 
+    def test_tab_state_describes_a_real_tab_without_switching_it(self):
+        tabs = cgpt.parse_tabs(cgpt.bridge("list"))
+        _, _, tab_id, url = tabs[0]
+        state = cgpt.parse_tab_state(cgpt.bridge("tab_state", tab_id))
+        self.assertIsNotNone(state)
+        self.assertGreater(state[0], 0)
+        self.assertGreaterEqual(state[1], 1)
+        self.assertIn(state[2], (True, False))
+        self.assertIn(state[3], (True, False))
+        self.assertEqual(state[4], url)
+
     def test_stable_id_survives_an_earlier_tab_closing(self):
         first = int(cgpt.bridge("open", "about:blank"))
         second = int(cgpt.bridge("open", "about:blank"))
@@ -559,7 +570,7 @@ class MainWiringTest(unittest.TestCase):
     def _run_main(self, argv=("hello",)):
         calls = {}
 
-        def ensure_tab(timeout):
+        def ensure_tab(timeout, held=None):
             calls["ensure_tab"] = timeout
             return 4242
 
@@ -611,30 +622,9 @@ class MainWiringTest(unittest.TestCase):
         _, calls = self._run_main()
         self.assertNotIn("bridge", calls)
 
-class OneShotSelectionTest(unittest.TestCase):
-    def test_claimed_first_candidate_uses_second_chatgpt_tab(self):
-        rows = "1\t1\t101\thttps://chatgpt.com/c/a\n1\t2\t202\thttps://chatgpt.com/c/b"
-        attempted = []
-        class Held:
-            def claim_tab(self, tab_id):
-                attempted.append(tab_id)
-                if tab_id == 101:
-                    raise cgpt.claims.ClaimBusy("busy")
-            def claim_conversation(self, identity):
-                pass
-            def release_tab(self, tab_id):
-                pass
-        real_bridge = cgpt.bridge
-        cgpt.bridge = lambda *args: rows if args[0] == "list" else (_ for _ in ()).throw(AssertionError(args))
-        try:
-            self.assertEqual(cgpt.claim_one_shot_tab(Held(), 3), 202)
-        finally:
-            cgpt.bridge = real_bridge
-        self.assertEqual(attempted, [101, 202])
-
 class OneShotConversationSelectionTest(unittest.TestCase):
     def test_claimed_conversation_fails_immediately_and_names_holder(self):
-        rows = "1\t1\t101\thttps://chatgpt.com/c/a\n1\t2\t202\thttps://chatgpt.com/c/b"
+        rows = "1\t1\t101\thttps://chatgpt.com/c/a"
         attempted_tabs = []
         released_tabs = []
         class Held:
@@ -645,14 +635,20 @@ class OneShotConversationSelectionTest(unittest.TestCase):
             def claim_conversation(self, identity):
                 if identity == "a":
                     raise cgpt.claims.ClaimBusy("conversation a is already claimed by rival")
-        real_bridge, real_eval = cgpt.bridge, cgpt.eval_js
-        cgpt.bridge = lambda *args: rows if args[0] == "list" else (_ for _ in ()).throw(AssertionError(args))
+            def claim_window(self, window_id):
+                pass
+        real_bridge, real_eval, real_load = cgpt.bridge, cgpt.eval_js, cgpt._load_windows
+        cgpt.bridge = lambda *args: (rows if args[0] == "list" else
+                                     "12\t1\t1\t0\thttps://chatgpt.com/c/a"
+                                     if args[0] == "tab_state" else
+                                     (_ for _ in ()).throw(AssertionError(args)))
+        cgpt._load_windows = lambda: [{"tab_id": 101, "window_id": 12}]
         cgpt.eval_js = lambda tab_id, expr: "https://chatgpt.com/c/a" if tab_id == 101 else "https://chatgpt.com/c/b"
         try:
             with self.assertRaises(cgpt.claims.ClaimBusy) as caught:
                 cgpt.claim_one_shot_tab(Held(), 3)
         finally:
-            cgpt.bridge, cgpt.eval_js = real_bridge, real_eval
+            cgpt.bridge, cgpt.eval_js, cgpt._load_windows = real_bridge, real_eval, real_load
         self.assertIn("rival", str(caught.exception))
         self.assertEqual(attempted_tabs, [101])
         self.assertEqual(released_tabs, [101])
@@ -671,7 +667,7 @@ class OneShotPostSendConversationClaimTest(unittest.TestCase):
                  ("ensure_tab", "eval_js", "send", "wait_for_reply")}
         real_claim_set = cgpt.claims.ClaimSet
         calls = {"location": 0}
-        cgpt.ensure_tab = lambda timeout: 4242
+        cgpt.ensure_tab = lambda timeout, held=None: 4242
         def eval_js(tab_id, expression):
             if expression == "location.href":
                 calls["location"] += 1
@@ -798,24 +794,33 @@ class OpenToolWindowTest(ToolWindowTest):
         events = []
 
         class Held:
+            def claim_tab(self, tab_id):
+                events.append(("tab", tab_id))
             def claim_window(self, window_id):
-                events.append(window_id)
+                events.append(("window", window_id))
+            def release_tab(self, tab_id):
+                events.append(("release", tab_id))
 
         self._bridge({"list": "", "open_window": "707\t12", "loading": "done"})
         cgpt.open_tab("https://chatgpt.com/", 5, Held())
-        self.assertEqual(events, [12])
+        self.assertEqual(events, [("tab", 707), ("window", 12)])
         self.assertEqual(self._windows()[0]["window_id"], 12)
 
     def test_a_window_that_cannot_be_claimed_is_never_recorded(self):
         """W0: lose the race, leave nothing behind for a later run to close."""
         class Held:
+            def claim_tab(self, tab_id):
+                pass
             def claim_window(self, window_id):
                 raise cgpt.claims.ClaimBusy("window 12 is already claimed")
+            def release_tab(self, tab_id):
+                pass
 
-        self._bridge({"list": "", "open_window": "707\t12", "loading": "done"})
+        self._bridge({"list": "", "open_window": "707\t12", "close": "ok"})
         with self.assertRaises(cgpt.claims.ClaimBusy):
             cgpt.open_tab("https://chatgpt.com/", 5, Held())
         self.assertEqual(cgpt._load_windows(), [])
+        self.assertIn(("close", 707), self.calls)
 
     def test_a_bridge_that_reports_no_window_records_nothing(self):
         self._bridge({"list": "", "open_window": "707", "loading": "done"})
@@ -864,6 +869,126 @@ class CleanupWindowTest(ToolWindowTest):
         cgpt.cleanup_window(707, "https://chatgpt.com/c/abc123")
         self.assertEqual([call[1] for call in self.calls], [12])
         self.assertEqual([item["tab_id"] for item in self._windows()], [808])
+
+
+class ReusableToolTabTest(ToolWindowTest):
+    class Held:
+        def __init__(self, busy=None):
+            self.busy = busy
+            self.events = []
+
+        def claim_tab(self, tab_id):
+            self.events.append(("claim_tab", tab_id))
+            if self.busy == "tab":
+                raise cgpt.claims.ClaimBusy("tab busy")
+
+        def claim_window(self, window_id):
+            self.events.append(("claim_window", window_id))
+            if self.busy == "window":
+                raise cgpt.claims.ClaimBusy("window busy")
+
+        def release_tab(self, tab_id):
+            self.events.append(("release_tab", tab_id))
+
+    def _record(self):
+        cgpt._record_window(707, 12)
+
+    def _state(self, tab_count=1, active=1, window_id=12):
+        return "%d\t%d\t%d\t0\thttps://chatgpt.com/c/owned" % (
+            window_id, tab_count, active)
+
+    def _assert_no_use(self):
+        self.assertFalse(any(call[0] in ("focus", "eval") for call in self.calls))
+
+    def test_an_unrecorded_tab_is_never_reused_even_on_the_right_conversation(self):
+        self._bridge({})
+        self.assertFalse(cgpt.claim_reusable_tab(707, self.Held()))
+        self._assert_no_use()
+
+    def test_a_recorded_window_with_two_tabs_is_not_reused(self):
+        self._record()
+        self._bridge({"tab_state": self._state(tab_count=2)})
+        self.assertFalse(cgpt.claim_reusable_tab(707, self.Held()))
+        self._assert_no_use()
+
+    def test_a_recorded_background_tab_is_not_reused(self):
+        self._record()
+        self._bridge({"tab_state": self._state(active=0)})
+        self.assertFalse(cgpt.claim_reusable_tab(707, self.Held()))
+        self._assert_no_use()
+
+    def test_a_tab_whose_claim_is_busy_is_not_reused(self):
+        self._record()
+        self._bridge({"tab_state": self._state()})
+        self.assertFalse(cgpt.claim_reusable_tab(707, self.Held("tab")))
+        self._assert_no_use()
+
+    def test_a_window_whose_claim_is_busy_is_not_reused_and_releases_the_tab(self):
+        self._record()
+        self._bridge({"tab_state": self._state()})
+        held = self.Held("window")
+        self.assertFalse(cgpt.claim_reusable_tab(707, held))
+        self.assertEqual(held.events[-1], ("release_tab", 707))
+        self._assert_no_use()
+
+    def test_all_four_conditions_reuse_the_tab_without_opening_a_window(self):
+        self._record()
+        rows = "1\t1\t707\thttps://chatgpt.com/c/owned"
+        self._bridge({"list": rows, "tab_state": self._state()})
+        held = self.Held()
+        self.assertEqual(cgpt.ensure_tab(5, held), 707)
+        self.assertEqual(held.events, [("claim_tab", 707), ("claim_window", 12)])
+        self.assertFalse(any(call[0] == "open_window" for call in self.calls))
+
+    def test_malformed_tab_state_is_a_clean_refusal(self):
+        self._record()
+        self._bridge({"tab_state": "12\t1\t1"})
+        self.assertFalse(cgpt.claim_reusable_tab(707, self.Held()))
+        self._assert_no_use()
+
+
+class OneShotToolWindowSelectionTest(ToolWindowTest):
+    def setUp(self):
+        super().setUp()
+        self.real_eval = cgpt.eval_js
+
+    def tearDown(self):
+        cgpt.eval_js = self.real_eval
+        super().tearDown()
+
+    def test_a_persons_chatgpt_tab_is_untouched_and_a_new_window_is_used(self):
+        user_tab = 606
+        rows = "1\t1\t606\thttps://chatgpt.com/c/person"
+        self._bridge({"list": rows, "open_window": "707\t12", "loading": "done"})
+        eval_calls = []
+        cgpt.eval_js = lambda tab_id, expression: (
+            eval_calls.append((tab_id, expression)) or "https://chatgpt.com/"
+        )
+
+        class Held:
+            def claim_tab(self, tab_id): pass
+            def claim_window(self, window_id): pass
+            def claim_conversation(self, identity): pass
+            def release_tab(self, tab_id): pass
+
+        self.assertEqual(cgpt.claim_one_shot_tab(Held(), 5), 707)
+        self.assertTrue(any(call[0] == "open_window" for call in self.calls))
+        self.assertFalse(any(call[0] in ("focus", "eval") and user_tab in call
+                             for call in self.calls))
+        self.assertFalse(any(tab_id == user_tab for tab_id, _ in eval_calls))
+
+
+class ParseTabStateTest(unittest.TestCase):
+    def test_a_complete_row_is_parsed(self):
+        self.assertEqual(
+            cgpt.parse_tab_state("12\t1\t1\t0\thttps://chatgpt.com/c/a"),
+            (12, 1, True, False, "https://chatgpt.com/c/a"),
+        )
+
+    def test_bad_or_missing_fields_are_rejected_without_an_exception(self):
+        for raw in ("", "12\t1\t1", "x\t1\t1\t0\thttps://chatgpt.com/",
+                    "12\t1\tyes\t0\thttps://chatgpt.com/"):
+            self.assertIsNone(cgpt.parse_tab_state(raw), raw)
 
 
 class WindowRegistryConcurrencyTest(unittest.TestCase):

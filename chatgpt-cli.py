@@ -104,6 +104,20 @@ def find_chatgpt_tab(tabs):
     return None
 
 
+def parse_tab_state(raw):
+    """Reject incomplete bridge evidence instead of guessing browser ownership."""
+    parts = raw.split("\t", 4)
+    if len(parts) != 5:
+        return None
+    try:
+        window_id, tab_count, active, minimized = [int(value) for value in parts[:4]]
+    except ValueError:
+        return None
+    if active not in (0, 1) or minimized not in (0, 1):
+        return None
+    return window_id, tab_count, bool(active), bool(minimized), parts[4]
+
+
 class StabilityTracker:
     """Decides when *our* reply is finished.
 
@@ -235,7 +249,16 @@ def open_tab(url, timeout, held=None):
     if len(parts) > 1:
         window_id = int(parts[1])
         if held:
-            held.claim_window(window_id)
+            try:
+                held.claim_tab(tab_id)
+                held.claim_window(window_id)
+            except claims.ClaimBusy:
+                held.release_tab(tab_id)
+                try:
+                    bridge("close", tab_id)
+                except Exception:
+                    pass
+                raise
         _record_window(tab_id, window_id)
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -282,55 +305,71 @@ def cleanup_window(tab_id, url):
         lock.close()
 
 
+def claim_reusable_tab(tab_id, held):
+    """Claim only a tab whose registry and live shape still prove it is ours.
+
+    A ChatGPT URL proves nothing about ownership: it may be the tab the person
+    is reading.  The registry, a single active tab in its recorded window, and
+    both kernel claims must all agree before any caller is allowed to use it.
+    """
+    if held is None:
+        return False
+    recorded_window = None
+    for item in _load_windows():
+        try:
+            if int(item.get("tab_id", -1)) == int(tab_id):
+                recorded_window = int(item["window_id"])
+                break
+        except (KeyError, TypeError, ValueError):
+            continue
+    if recorded_window is None:
+        return False
+    try:
+        state = parse_tab_state(bridge("tab_state", tab_id))
+    except CliError:
+        return False
+    if state is None:
+        return False
+    window_id, tab_count, active, _minimized, _url = state
+    if window_id != recorded_window or tab_count != 1 or not active:
+        return False
+    try:
+        held.claim_tab(tab_id)
+    except claims.ClaimBusy:
+        return False
+    try:
+        held.claim_window(window_id)
+    except claims.ClaimBusy:
+        held.release_tab(tab_id)
+        return False
+    return True
+
+
 def ensure_tab(timeout, held=None):
-    """Find the open ChatGPT tab, or open one and wait for it to load."""
-    found = find_chatgpt_tab(parse_tabs(bridge("list")))
-    if found:
-        return found
+    """Reuse only a proved tool tab; every other ChatGPT tab is the user's."""
+    for _window_index, _tab_index, tab_id, url in parse_tabs(bridge("list")):
+        try:
+            host = urlsplit(url).hostname
+        except ValueError:
+            continue
+        if (host and host.lower() in CHATGPT_HOSTS
+                and claim_reusable_tab(tab_id, held)):
+            return tab_id
     return open_tab(CHATGPT_URL, timeout, held)
 
 
 def claim_one_shot_tab(held, timeout):
     """Claim an available ChatGPT tab and the conversation it currently shows."""
-    first = ensure_tab(timeout)
-
-    def claim_candidate(tab_id, known_url=None):
-        try:
-            held.claim_tab(tab_id)
-        except claims.ClaimBusy:
-            return False
-        try:
-            url = known_url
-            if url is None:
-                value = eval_js(tab_id, "location.href")
-                url = value if isinstance(value, str) else None
-            held.claim_conversation(claims.conversation_id(url))
-        except claims.ClaimBusy:
-            # A busy tab is replaceable; an already-owned conversation is not.
-            # Release the tab we just took, then preserve the holder diagnostic.
-            held.release_tab(tab_id)
-            raise
-        return True
-
-    # Keep the common path cheap: if the first reusable tab is free, no second
-    # bridge listing is needed. Only contention makes us enumerate alternatives.
-    if claim_candidate(first):
-        return first
-
-    for _window, _index, tab_id, url in parse_tabs(bridge("list")):
-        if tab_id == first:
-            continue
-        try:
-            host = urlsplit(url).hostname
-        except ValueError:
-            continue
-        if not host or host.lower() not in CHATGPT_HOSTS:
-            continue
-        if claim_candidate(tab_id, url):
-            return tab_id
-
-    tab_id = open_tab(CHATGPT_URL, timeout, held)
-    held.claim_tab(tab_id)
+    tab_id = ensure_tab(timeout, held)
+    try:
+        value = eval_js(tab_id, "location.href")
+        url = value if isinstance(value, str) else None
+        held.claim_conversation(claims.conversation_id(url))
+    except claims.ClaimBusy:
+        # A busy conversation is not replaceable: another tab would still name
+        # the same durable object, so release our tab and preserve the holder.
+        held.release_tab(tab_id)
+        raise
     return tab_id
 
 

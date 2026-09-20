@@ -615,7 +615,8 @@ def resolve_session_tab(entry, timeout, held=None):
     bound = entry.get("tab_id")
     if isinstance(bound, int):
         for _window, _index, tab_id, current_url in cgpt.parse_tabs(cgpt.bridge("list")):
-            if tab_id == bound and _same_conversation(current_url, url):
+            if (tab_id == bound and _same_conversation(current_url, url)
+                    and cgpt.claim_reusable_tab(bound, held)):
                 return bound
     return cgpt.open_tab(url, timeout, held)
 
@@ -863,7 +864,7 @@ def run(args, log, progress):
             held.claim_tab(tab_id)
             goto(tab_id, NEW_CHAT_URL, args.timeout)
         else:
-            tab_id = cgpt.ensure_tab(args.timeout)
+            tab_id = cgpt.ensure_tab(args.timeout, held)
             held.claim_tab(tab_id)
             goto(tab_id, NEW_CHAT_URL, args.timeout)
 

@@ -561,7 +561,7 @@ class _FakeCgpt:
         self.replies = list(replies)
         self.sent = []
 
-    def ensure_tab(self, timeout):
+    def ensure_tab(self, timeout, held=None):
         return 101
 
     def open_tab(self, url, timeout, held=None):
@@ -882,16 +882,21 @@ class SessionBindingSelectionTest(unittest.TestCase):
     def tearDown(self):
         agent.cgpt = self._cgpt
 
-    def _browser(self, rows, opened=909):
+    def _browser(self, rows, opened=909, reusable=False):
         class Browser:
             def __init__(self):
                 self.opened = []
+                self.calls = []
             def bridge(self, *args):
+                self.calls.append(args)
                 if args[0] == "list":
                     return rows
                 raise AssertionError(args)
             def parse_tabs(self, raw):
                 return self._cgpt.parse_tabs(raw)
+            def claim_reusable_tab(self, tab_id, held):
+                self.calls.append(("claim_reusable_tab", tab_id))
+                return reusable
             def open_tab(self, url, timeout, held=None):
                 self.opened.append((url, timeout))
                 return opened
@@ -918,6 +923,17 @@ class SessionBindingSelectionTest(unittest.TestCase):
         agent.cgpt = browser
         self.assertEqual(agent.resolve_session_tab({"url": "https://chatgpt.com/c/legacy"}, 12), 911)
         self.assertEqual(browser.opened[0][0], "https://chatgpt.com/c/legacy")
+
+    def test_a_bound_background_tab_in_a_shared_window_is_reopened_without_use(self):
+        rows = "1\t2\t707\thttps://chatgpt.com/c/wanted"
+        browser = self._browser(rows, opened=912, reusable=False)
+        agent.cgpt = browser
+        held = object()
+        entry = {"url": "https://chatgpt.com/c/wanted", "tab_id": 707}
+        self.assertEqual(agent.resolve_session_tab(entry, 12, held), 912)
+        self.assertEqual(browser.opened, [("https://chatgpt.com/c/wanted", 12)])
+        self.assertFalse(any(call[0] in ("focus", "eval") and 707 in call
+                             for call in browser.calls))
 
 
 class TabGoneRecoveryTest(unittest.TestCase):
@@ -990,8 +1006,10 @@ class TabGoneRecoveryTest(unittest.TestCase):
                 return "done"
             def eval_js(self, tab_id, expr):
                 return "https://chatgpt.com/c/original"
-            def ensure_tab(self, timeout):
+            def ensure_tab(self, timeout, held=None):
                 return 101
+            def claim_reusable_tab(self, tab_id, held):
+                return True
             def find_chatgpt_tab(self, tabs):
                 return 101
         agent.cgpt = Browser()
@@ -1209,6 +1227,10 @@ class ToolWindowLifecycleTest(unittest.TestCase):
             def parse_tabs(self, raw):
                 return [(1, 1, 101, "https://chatgpt.com/c/original")]
 
+            def claim_reusable_tab(self, tab_id, held):
+                self.calls.append(("claim_reusable_tab", tab_id))
+                return True
+
             def open_tab(self, url, timeout, held=None):
                 self.calls.append(("open_tab", url))
                 return 202
@@ -1229,7 +1251,7 @@ class ToolWindowLifecycleTest(unittest.TestCase):
             def eval_js(self, tab_id, expr):
                 return "https://chatgpt.com/c/original"
 
-            def ensure_tab(self, timeout):
+            def ensure_tab(self, timeout, held=None):
                 self.calls.append(("ensure_tab",))
                 return 101
 

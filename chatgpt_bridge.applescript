@@ -6,6 +6,7 @@
 --   osascript chatgpt_bridge.applescript list
 --   osascript chatgpt_bridge.applescript open <url>
 --   osascript chatgpt_bridge.applescript loading <tabid>
+--   osascript chatgpt_bridge.applescript tab_state <tabid>
 --   osascript chatgpt_bridge.applescript focus <tabid>
 --   osascript chatgpt_bridge.applescript eval <javascript> <tabid>
 --   osascript chatgpt_bridge.applescript close <tabid>
@@ -68,6 +69,23 @@ on run argv
 						else
 							return "done"
 						end if
+					end if
+				end repeat
+			end repeat
+			error "tab not found: " & (theId as text)
+
+		else if theMode is "tab_state" then
+			set theId to (item 2 of argv) as integer
+			repeat with win in windows
+				set t to 0
+				repeat with tb in tabs of win
+					set t to t + 1
+					if ((id of tb) as integer) is theId then
+						set isActive to 0
+						if (active tab index of win) is t then set isActive to 1
+						set isMinimized to 0
+						if minimized of win then set isMinimized to 1
+						return ((id of win) as integer as text) & sep & ((count of tabs of win) as text) & sep & (isActive as text) & sep & (isMinimized as text) & sep & (URL of tb)
 					end if
 				end repeat
 			end repeat

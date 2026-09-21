@@ -112,7 +112,9 @@ def check_chatgpt_tab():
     except cgpt.CliError:
         c.detail = "could not list tabs"
         return c, None
-    found = cgpt.find_chatgpt_tab(tabs)
+    # parse_tabs rows are (window, tab, stable id, url); the id is what
+    # eval_js takes.
+    found = next((row[2] for row in tabs if cgpt.is_chatgpt_url(row[3])), None)
     c.ok = found is not None
     c.detail = ("tab " + str(found)) if found is not None else "none"
     c.fix = "Open https://chatgpt.com/ in Edge. The tool will also open one\nitself, but signing in has to happen by hand."
@@ -155,7 +157,13 @@ def main():
         tab_check, tab = check_chatgpt_tab()
         checks.append(tab_check)
         checks.append(check_apple_events_js(tab))
-        checks.append(check_signed_in(tab if checks[-1].ok else None))
+        js = checks[-1]
+        if js.ok:
+            checks.append(check_signed_in(tab))
+        else:
+            skipped = Check("Signed in to ChatGPT")
+            skipped.detail = "skipped - JavaScript could not run in tab " + str(tab)
+            checks.append(skipped)
     checks.append(check_ripgrep())
 
     for check in checks:

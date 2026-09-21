@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.0
+
+**Every run gets its own small Edge window, and never borrows yours.** A run
+opens its ChatGPT tab in a window of its own, sized small and parked in a corner,
+cascaded so parallel runs do not stack on one spot. Earlier releases opened the
+tab in whatever Edge window was in front — usually the one you were working in —
+and two runs sharing that window could time out each other's Apple Events
+(`-1712`). The run closes its window when it finishes; an interrupted run leaves
+it open for `--resume`.
+
+**Your own ChatGPT tabs are left alone.** The tool only drives tabs it opened
+itself (recorded in `~/.chatgpt-agent/windows.json`, written under a file lock).
+A ChatGPT tab you opened by hand is never picked up, typed into or closed. The
+cascade counts only the tool's own live windows, so your windows never shift it.
+
+**Tab claims are taken once, where the tab is opened.** A run that has to rebind
+after its tab disappears now really releases the dead tab, so a parallel run is
+no longer refused a tab that no longer exists.
+
+**`doctor` works again.** It had crashed with `AttributeError` since the tab
+bookkeeping changed; it now reports the ChatGPT tab by its stable id, and when
+JavaScript cannot run in that tab the sign-in check says so instead of claiming
+there is no tab. `doctor` has a test for the first time.
+
 ## 0.6.0
 
 **Runs can now happen in parallel, one per conversation.** A review, a plan and

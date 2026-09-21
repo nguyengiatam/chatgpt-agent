@@ -87,7 +87,10 @@ releases ownership when the process ends, including `kill -9`, so there is no
 manual unlock step. `--prune` reports leftover unlocked claim files separately
 from dead checkpoints and stale sessions.
 
-All runs still share one Edge instance. Several streaming tabs consume more
+Each run opens its tab in a small window of its own, cascaded in a corner, and
+never drives a ChatGPT tab it did not open; the window closes when the run
+finishes and stays for `--resume` when it is interrupted. All runs still share
+one Edge instance. Several streaming tabs consume more
 machine resources than one and there is no enforced concurrency limit. A run
 also cannot outlive a machine sleep longer than `--timeout`; for long unattended
 runs, use `caffeinate -dimsu` around the invocation to keep macOS awake.

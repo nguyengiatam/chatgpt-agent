@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The c2c wire format: how ChatGPT asks for data and how results go back.
 
-One turn carries at most one request. The model emits a fenced block tagged
-`c2c` holding {"ops": [...]}; a reply with no such block is the final answer.
+The model asks by emitting one or more fenced blocks tagged `c2c`, each
+holding {"ops": [...]}; every block is served, in order, as one op list. A reply
+with no such block is the final answer.
 That rule is chosen so the benign failure is the likely one - a model that
 forgets the block ends the loop early, rather than one that forgets a "done"
 marker and hangs it forever.
@@ -32,21 +33,33 @@ def extract_ops(reply):
 
     Raises ProtocolError when a c2c block exists but does not hold a usable
     request - the caller turns that into one corrective turn.
+
+    A reply may carry more than one block, and every tagged block is a request:
+    returning on the first one dropped the rest without a word, so the model got
+    results for half of what it asked and either re-asked or carried on believing
+    it had data it never received.
     """
-    untagged = None
+    ops = []
+    untagged = []
     for match in _FENCE.finditer(reply or ""):
         tag = match.group(1).strip().lower()
         if tag == "c2c":
-            return _parse_request(match.group(2))
+            ops.extend(_parse_request(match.group(2)))
+            continue
         # ChatGPT puts the language in a header element beside the code, not on
         # the <code>, and that header lands late: sampled early, the same block
         # renders with no tag at all. An untagged block shaped exactly like a
         # request is one of ours, and losing it costs a whole round.
-        if not tag and untagged is None and _looks_like_request(match.group(2)):
-            untagged = match.group(2)
-    if untagged is not None:
-        return _parse_request(untagged)
-    return None
+        if not tag and _looks_like_request(match.group(2)):
+            untagged.append(match.group(2))
+    if ops:
+        # The tag landed, so the untagged blocks are the model's own JSON-shaped
+        # prose, not a request whose label is still on its way. Serving them
+        # would run ops nobody asked for; gather them only when nothing is tagged.
+        return ops
+    for raw in untagged:
+        ops.extend(_parse_request(raw))
+    return ops or None
 
 
 def _looks_like_request(raw):

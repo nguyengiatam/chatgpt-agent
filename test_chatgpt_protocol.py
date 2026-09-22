@@ -26,12 +26,57 @@ class ExtractOpsTest(unittest.TestCase):
         reply = '```c2c   \n{"ops":[{"op":"list","path":"."}]}\n```'
         self.assertEqual(proto.extract_ops(reply), [{"op": "list", "path": "."}])
 
-    def test_first_block_wins_when_the_model_emits_two(self):
+    def test_two_c2c_blocks_are_both_served_in_order(self):
+        # Reported by the operator after reading a real conversation: ChatGPT
+        # answers with two blocks, and dropping the second is silent.
         reply = (
-            '```c2c\n{"ops":[{"op":"read","path":"first.py"}]}\n```\n'
-            '```c2c\n{"ops":[{"op":"read","path":"second.py"}]}\n```'
+            '```c2c\n{"ops":[{"op":"read","path":"a.py"}]}\n```\n'
+            '```c2c\n{"ops":[{"op":"git_log","n":5}]}\n```'
         )
-        self.assertEqual(proto.extract_ops(reply), [{"op": "read", "path": "first.py"}])
+        self.assertEqual(
+            proto.extract_ops(reply),
+            [{"op": "read", "path": "a.py"}, {"op": "git_log", "n": 5}],
+        )
+
+    def test_several_blocks_keep_their_order_and_prose_is_ignored(self):
+        reply = (
+            'First, the file.\n\n'
+            '```c2c\n{"ops":[{"op":"read","path":"a.py"}]}\n```\n\n'
+            'And the log.\n\n'
+            '```c2c\n{"ops":[{"op":"git_log","n":5}]}\n```\n'
+        )
+        self.assertEqual(
+            [op["op"] for op in proto.extract_ops(reply)], ["read", "git_log"]
+        )
+
+    def test_an_untagged_request_is_not_merged_into_a_tagged_block(self):
+        # The tagged block proves the language label landed; an untagged block
+        # beside it is prose that happens to be JSON, not a late-labelled one.
+        reply = (
+            '```c2c\n{"ops":[{"op":"read","path":"a.py"}]}\n```\n'
+            '```\n{"ops":[{"op":"git_log","n":5}]}\n```'
+        )
+        self.assertEqual(proto.extract_ops(reply), [{"op": "read", "path": "a.py"}])
+
+    def test_two_untagged_request_blocks_are_gathered_when_none_is_tagged(self):
+        # The renderer state before the c2c label lands, for more than one block.
+        reply = (
+            '```\n{"ops":[{"op":"read","path":"a.py"}]}\n```\n'
+            '```\n{"ops":[{"op":"git_log","n":5}]}\n```'
+        )
+        self.assertEqual(
+            proto.extract_ops(reply),
+            [{"op": "read", "path": "a.py"}, {"op": "git_log", "n": 5}],
+        )
+
+    def test_a_broken_second_c2c_block_still_raises(self):
+        # The first block parses; the second does not, and must not be dropped.
+        reply = (
+            '```c2c\n{"ops":[{"op":"read","path":"a.py"}]}\n```\n'
+            '```c2c\n{"ops":[{"op":}]}\n```'
+        )
+        with self.assertRaises(proto.ProtocolError):
+            proto.extract_ops(reply)
 
     def test_a_python_block_is_not_mistaken_for_a_request(self):
         reply = 'Suggested fix:\n\n```python\nprint("ops")\n```\n'

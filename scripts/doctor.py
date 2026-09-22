@@ -41,8 +41,13 @@ def _report(check):
     mark = "✓" if check.ok else ("✗" if check.fatal else "-")
     line = "  " + mark + " " + check.name
     if check.detail:
-        line += ": " + check.detail
-    print(line)
+        detail_lines = check.detail.split("\n")
+        line += ": " + detail_lines[0]
+        print(line)
+        for extra_line in detail_lines[1:]:
+            print("      " + extra_line)
+    else:
+        print(line)
     if not check.ok and check.fix:
         for fix_line in check.fix.split("\n"):
             print("      " + fix_line)
@@ -85,7 +90,7 @@ def check_automation():
         c.ok = True
         c.detail = "granted"
     except cgpt.CliError as exc:
-        c.detail = str(exc).split("\n")[0]
+        c.detail = str(exc)
         c.fix = "System Settings > Privacy & Security > Automation >\nyour terminal app > enable Microsoft Edge."
     return c
 
@@ -100,8 +105,12 @@ def check_apple_events_js(tab):
         c.ok = value.strip() == "2"
         c.detail = "enabled" if c.ok else "unexpected reply " + repr(value[:40])
     except cgpt.CliError as exc:
-        c.detail = str(exc).split("\n")[0]
-    c.fix = "In Edge's menu bar: View > Developer >\nAllow JavaScript from Apple Events."
+        message = str(exc)
+        if message == cgpt.ENABLE_HINT:
+            c.detail = message
+            c.fix = "In Edge's menu bar: View > Developer >\nAllow JavaScript from Apple Events."
+        else:
+            c.detail = "probe failed for an unclassified reason:\n" + message
     return c
 
 
@@ -131,7 +140,7 @@ def check_signed_in(tab):
         c.ok = bool(probe.get("ok"))
         c.detail = "composer ready" if c.ok else str(probe.get("error"))
     except cgpt.CliError as exc:
-        c.detail = str(exc).split("\n")[0]
+        c.detail = str(exc)
     c.fix = "Sign in to ChatGPT in that tab. Automated sign-in is blocked by\ndesign and this tool does not attempt it."
     return c
 

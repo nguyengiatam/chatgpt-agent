@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+**`doctor` stops blaming the Edge JavaScript setting for every bridge failure.** The menu-bar fix is attached only when the refusal is a genuine JavaScript denial; any other failure now says the probe could not be classified and prints the whole error, not just its first line.
+
 **Every c2c block in a reply is served, in order.** `extract_ops()` returned on the first block it met, so a reply carrying two lost the second without a word - the model got results for half of what it asked and either re-asked or carried on believing it had data it never received. All tagged blocks are now gathered into one op list; an untagged request-shaped block is still served only when no tagged block is present, and a broken block still raises.
 
 ## 0.7.1

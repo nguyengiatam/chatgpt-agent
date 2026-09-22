@@ -605,20 +605,31 @@ def track_conversation(tab_id, progress, held, args, log):
 
 
 def resolve_session_tab(entry, timeout, held=None):
-    """Return a binding only if its tab still shows this exact conversation.
+    """Open the bound conversation in a window of this run's own; never reuse.
 
-    A surviving tab id is insufficient: the user can drive that tab to another
-    conversation while every host/existence check still passes. Unknown or stale
-    bindings are reopened from the durable conversation URL instead.
+    Reusing the bound tab was the stall behind issue 7 fix (2): that tab outlived
+    an earlier run as a background tab in a small tool window, and by the time a
+    --resume reached it the window was long occluded. Chromium throttles a tab
+    like that, the Apple Event that drives it times out, and the run stalls
+    without making a single edit - and occlusion is not something AppleScript can
+    ask about. A window opened here is new, the same shape every fresh run
+    already drives reliably.
+
+    The old tool window is cleaned up only after the new one is open, so a failed
+    open cannot leave the conversation with no window at all. cleanup_window()
+    checks ownership for itself - the windows.json record, a single-tab window,
+    and the same conversation - and leaves anything it cannot prove ours alone; a
+    cleanup that fails is swallowed rather than allowed to fail the run.
     """
     url = entry["url"]
     bound = entry.get("tab_id")
+    tab_id = cgpt.open_tab(url, timeout, held)
     if isinstance(bound, int):
-        for _window, _index, tab_id, current_url in cgpt.parse_tabs(cgpt.bridge("list")):
-            if (tab_id == bound and _same_conversation(current_url, url)
-                    and cgpt.claim_reusable_tab(bound, held)):
-                return bound
-    return cgpt.open_tab(url, timeout, held)
+        try:
+            cgpt.cleanup_window(bound, url)
+        except Exception:
+            pass  # W4: any doubt about the window means leave it alone
+    return tab_id
 
 
 def _rebind_after_tab_gone(tab_id, url, held, args, log):

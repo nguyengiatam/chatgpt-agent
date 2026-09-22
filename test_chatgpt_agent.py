@@ -926,10 +926,11 @@ class SessionBindingSelectionTest(unittest.TestCase):
     def tearDown(self):
         agent.cgpt = self._cgpt
 
-    def _browser(self, rows, opened=909, reusable=False):
+    def _browser(self, rows, opened=909):
         class Browser:
             def __init__(self):
                 self.opened = []
+                self.cleaned = []
                 self.calls = []
             def bridge(self, *args):
                 self.calls.append(args)
@@ -938,12 +939,11 @@ class SessionBindingSelectionTest(unittest.TestCase):
                 raise AssertionError(args)
             def parse_tabs(self, raw):
                 return self._cgpt.parse_tabs(raw)
-            def claim_reusable_tab(self, tab_id, held):
-                self.calls.append(("claim_reusable_tab", tab_id))
-                return reusable
             def open_tab(self, url, timeout, held=None):
                 self.opened.append((url, timeout))
                 return opened
+            def cleanup_window(self, tab_id, url):
+                self.cleaned.append((tab_id, url))
         browser = Browser()
         browser._cgpt = self._cgpt
         return browser
@@ -968,16 +968,39 @@ class SessionBindingSelectionTest(unittest.TestCase):
         self.assertEqual(agent.resolve_session_tab({"url": "https://chatgpt.com/c/legacy"}, 12), 911)
         self.assertEqual(browser.opened[0][0], "https://chatgpt.com/c/legacy")
 
-    def test_a_bound_background_tab_in_a_shared_window_is_reopened_without_use(self):
-        rows = "1\t2\t707\thttps://chatgpt.com/c/wanted"
-        browser = self._browser(rows, opened=912, reusable=False)
+    def test_a_live_bound_tab_is_still_reopened_in_a_window_of_its_own(self):
+        # Issue 7 fix (2): reusing the bound tab stalls when its old tool window
+        # is occluded, which AppleScript cannot detect. The same conversation is
+        # therefore opened fresh, and the stale window is cleaned up afterwards.
+        rows = "1\t1\t707\thttps://chatgpt.com/c/wanted"
+        browser = self._browser(rows, opened=912)
         agent.cgpt = browser
-        held = object()
         entry = {"url": "https://chatgpt.com/c/wanted", "tab_id": 707}
-        self.assertEqual(agent.resolve_session_tab(entry, 12, held), 912)
+        self.assertEqual(agent.resolve_session_tab(entry, 12), 912)
         self.assertEqual(browser.opened, [("https://chatgpt.com/c/wanted", 12)])
-        self.assertFalse(any(call[0] in ("focus", "eval") and 707 in call
-                             for call in browser.calls))
+        self.assertEqual(browser.cleaned, [(707, "https://chatgpt.com/c/wanted")])
+
+    def test_no_bound_tab_opens_fresh_and_cleans_nothing_up(self):
+        browser = self._browser("", opened=913)
+        agent.cgpt = browser
+        self.assertEqual(agent.resolve_session_tab({"url": "https://chatgpt.com/c/x"}, 12), 913)
+        self.assertEqual(browser.opened[0][0], "https://chatgpt.com/c/x")
+        self.assertEqual(browser.cleaned, [])
+
+    def test_a_failed_open_leaves_the_old_window_alone(self):
+        # The old window is only cleaned up once the new one exists: an open
+        # that raises must not close the tab the conversation was still in.
+        browser = self._browser("1\t1\t707\thttps://chatgpt.com/c/wanted", opened=914)
+
+        def failing_open(url, timeout, held=None):
+            raise RuntimeError("no window")
+
+        browser.open_tab = failing_open
+        agent.cgpt = browser
+        entry = {"url": "https://chatgpt.com/c/wanted", "tab_id": 707}
+        with self.assertRaises(RuntimeError):
+            agent.resolve_session_tab(entry, 12)
+        self.assertEqual(browser.cleaned, [])
 
 
 class TabGoneRecoveryTest(unittest.TestCase):
@@ -1017,7 +1040,7 @@ class TabGoneRecoveryTest(unittest.TestCase):
                                   focus=False, max_rounds=2, max_chars=1000, round_chars=500,
                                   timeout=1, poll=0, retries=1)
 
-    def _install_browser(self, vanish_twice=False):
+    def _install_browser(self, vanish_times=0):
         outer = self
         class Browser:
             class CliError(RuntimeError): pass
@@ -1026,6 +1049,9 @@ class TabGoneRecoveryTest(unittest.TestCase):
                 self.sent = []
                 self.wait_tabs = []
                 self.opened = []
+                self.cleaned = []
+                self._next_tab = 201
+                self.vanishes_left = vanish_times
             def bridge(self, *args):
                 if args[0] == "list":
                     return "1\t1\t101\thttps://chatgpt.com/c/original"
@@ -1036,19 +1062,22 @@ class TabGoneRecoveryTest(unittest.TestCase):
                 return [(1, 1, 101, "https://chatgpt.com/c/original")]
             def open_tab(self, url, timeout, held=None):
                 self.opened.append(url)
+                tab_id = self._next_tab
+                self._next_tab += 1
                 if held:
-                    held.claim_tab(202)
-                return 202
+                    held.claim_tab(tab_id)
+                return tab_id
+            def cleanup_window(self, tab_id, url):
+                self.cleaned.append((tab_id, url))
             def needs_attachment(self, message): return False
             def send(self, tab_id, message):
                 self.sent.append((tab_id, message))
                 return "marker-1"
             def wait_for_reply(self, tab_id, marker, timeout, poll):
                 self.wait_tabs.append(tab_id)
-                if tab_id == 101:
+                if self.vanishes_left > 0:
+                    self.vanishes_left -= 1
                     raise self.TabGone("gone")
-                if vanish_twice:
-                    raise self.TabGone("gone again")
                 return "done"
             def eval_js(self, tab_id, expr):
                 return "https://chatgpt.com/c/original"
@@ -1062,17 +1091,17 @@ class TabGoneRecoveryTest(unittest.TestCase):
         return agent.cgpt
 
     def test_tab_gone_recovers_once_without_resending_and_rebinds_claim(self):
-        browser = self._install_browser()
+        browser = self._install_browser(vanish_times=1)
         answer = agent.run(self._args(), lambda line: None, {})
         self.assertEqual(answer, "done")
         self.assertEqual(len(browser.sent), 1)
-        self.assertEqual(browser.wait_tabs, [101, 202])
-        self.assertIn(("release_tab", 101), self.events)
+        self.assertEqual(browser.wait_tabs, [201, 202])
+        self.assertIn(("release_tab", 201), self.events)
         self.assertIn(("claim_tab", 202), self.events)
         self.assertEqual(agent.load_sessions()["app"]["tab_id"], 202)
 
     def test_second_tab_gone_stops_and_names_conversation(self):
-        self._install_browser(vanish_twice=True)
+        self._install_browser(vanish_times=2)
         with self.assertRaises(Exception) as caught:
             agent.run(self._args(), lambda line: None, {})
         self.assertIn("https://chatgpt.com/c/original", str(caught.exception))
@@ -1316,14 +1345,20 @@ class ToolWindowLifecycleTest(unittest.TestCase):
         self._install_claims()
         browser = self._install_browser()
         self.assertEqual(agent.run(self._args(), lambda line: None, {}), "done")
-        self.assertEqual(browser.cleaned, [(101, "https://chatgpt.com/c/original")])
+        # resolve_session_tab() opened window 202 for this run and, once it was
+        # open, cleaned up the stale 101 from the session binding. The run then
+        # closed its own window (202) on the way out.
+        self.assertIn((202, "https://chatgpt.com/c/original"), browser.cleaned)
+        self.assertIn((101, "https://chatgpt.com/c/original"), browser.cleaned)
 
-    def test_an_interrupted_run_leaves_its_window_for_resume(self):
+    def test_an_interrupted_run_leaves_its_own_window_for_resume(self):
         self._install_claims()
         browser = self._install_browser(never_replies=True)
         with self.assertRaises(Exception):
             agent.run(self._args(), lambda line: None, {})
-        self.assertEqual(browser.cleaned, [])
+        # The window this run opened is not closed - that is what a --resume
+        # would find. (The stale 101 binding is cleaned once 202 is open.)
+        self.assertNotIn((202, "https://chatgpt.com/c/original"), browser.cleaned)
 
     def test_losing_the_conversation_race_touches_no_browser(self):
         self._install_claims(busy_on="conversation")

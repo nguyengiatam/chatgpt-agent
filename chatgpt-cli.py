@@ -116,32 +116,98 @@ def parse_tab_state(raw):
     return window_id, tab_count, bool(active), bool(minimized), parts[4]
 
 
+# The action bar - the Copy / thumbs row ChatGPT renders under an assistant
+# message only once that message is complete - is the positive end-of-message
+# signal. Two stable polls are not enough on their own: ChatGPT streams in
+# bursts and the stop button is absent during the gaps, so a mid-stream pause
+# used to be read as a finished message. The settle window then re-checks the
+# text after the signal first appears, and the fallback bounds how long a
+# missing signal is waited for before accepting a stable reply anyway.
+SETTLE_SECONDS = 10.0
+ACTION_BAR_FALLBACK_SECONDS = 60.0
+
+
 class StabilityTracker:
     """Decides when *our* reply is finished.
 
     The page-wide stop button only counts against us while our reply is still
     the newest message; once someone else has answered after us, ours is
     necessarily complete and their streaming must not hold us up.
+
+    A reply is finished only when the stop button is clear, the text has been
+    stable for ``stable_polls`` samples, AND the action bar under our own turn
+    is present. The action bar is the real signal - the stop button alone is
+    absent during ordinary streaming gaps - so when it is present the text is
+    re-read once more after ``settle_seconds`` before the reply is handed back,
+    and a reply whose text grew, or whose action bar vanished, in that window is
+    not finished after all.
+
+    If the action bar never appears, a reply that stays stable and unstreaming
+    for ``fallback_seconds`` is accepted anyway, with one warning: a ChatGPT
+    redesign then degrades to slow-but-correct rather than to a hang.
     """
 
-    def __init__(self, stable_polls=2):
+    def __init__(self, stable_polls=2, settle_seconds=SETTLE_SECONDS,
+                 fallback_seconds=ACTION_BAR_FALLBACK_SECONDS):
         self.stable_polls = stable_polls
+        self.settle_seconds = settle_seconds
+        self.fallback_seconds = fallback_seconds
         self._last_text = None
         self._stable = 0
+        self._settle_until = None
+        self._settle_text = None
+        self._fallback_since = None
 
-    def update(self, found, streaming, is_last, text):
+    def update(self, found, streaming, is_last, text, action_bar, now=None):
+        """One poll. Returns "finished", "fallback", or None to keep waiting."""
+        now = time.time() if now is None else now
         ours_still_streaming = streaming and is_last
         if not found or ours_still_streaming or not text:
-            self._stable = 0
+            self.reset()
             self._last_text = text
-            return False
+            return None
         self._stable = self._stable + 1 if text == self._last_text else 0
         self._last_text = text
-        return self._stable >= self.stable_polls
+
+        if action_bar:
+            self._fallback_since = None
+            if self._stable < self.stable_polls:
+                self._settle_until = None
+                return None
+            if self._settle_until is None:
+                self._settle_until = now + self.settle_seconds
+                self._settle_text = text
+                return None
+            if now < self._settle_until:
+                return None
+            if text == self._settle_text:
+                return "finished"
+            self._settle_until = None
+            return None
+
+        self._settle_until = None
+        if self._stable < self.stable_polls:
+            self._fallback_since = None
+            return None
+        if self._fallback_since is None:
+            self._fallback_since = now
+            return None
+        if now - self._fallback_since >= self.fallback_seconds:
+            _notify(
+                "warning: no action bar appeared under the reply after "
+                + str(int(self.fallback_seconds)) + "s of stable text; accepting "
+                "it without the end-of-message signal (the ChatGPT DOM may have "
+                "changed)."
+            )
+            return "fallback"
+        return None
 
     def reset(self):
         """Forget the run of stable samples - the message was not done after all."""
         self._stable = 0
+        self._settle_until = None
+        self._settle_text = None
+        self._fallback_since = None
 
 
 # --- browser plumbing ------------------------------------------------------
@@ -548,6 +614,7 @@ def wait_for_reply(tab_id, marker, timeout, poll):
             latest.get("streaming", False),
             latest.get("isLast", False),
             latest.get("text", ""),
+            latest.get("actionBar", False),
         ):
             markdown = latest.get("markdown", "")
             # Settled text is not a settled message: the code block is still

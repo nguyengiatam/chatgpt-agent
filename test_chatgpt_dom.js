@@ -420,3 +420,60 @@ test("state reads the answer once the markdown body exists", () => {
   assert.strictEqual(state.text, "GO - nothing found.");
   assert.ok(state.markdown.includes("GO - nothing found."));
 });
+
+// --- state(): the action bar is the end-of-message signal ------------------
+// ChatGPT renders the per-message action bar (Copy / thumbs / read aloud)
+// under an assistant turn only once it is complete. The boolean must be about
+// OUR turn - the one pickReply selected - not the page at large.
+
+function turnWithBar(markdownBody, hasBar) {
+  return {
+    getAttribute: (a) => (a === "data-message-author-role" ? "assistant" : null),
+    textContent: "",
+    querySelector: (sel) =>
+      sel === CGPT.SELECTORS.copyTurnButton ? (hasBar ? {} : null) : markdownBody,
+  };
+}
+
+test("state reports the action bar when our own turn carries one", () => {
+  const body = el("DIV", ["done."]);
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [userTurn("MARKER-1"), turnWithBar(body, true)],
+    body: {},
+  };
+  assert.strictEqual(CGPT.state("MARKER-1").actionBar, true);
+});
+
+test("state reports no action bar while our own turn has none", () => {
+  const body = el("DIV", ["still going."]);
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [userTurn("MARKER-1"), turnWithBar(body, false)],
+    body: {},
+  };
+  assert.strictEqual(CGPT.state("MARKER-1").actionBar, false);
+});
+
+test("a copy button in a different turn does not mark ours finished", () => {
+  // Their turn - after ours - carries a bar. Ours does not. Ours is unfinished.
+  const ours = turnWithBar(el("DIV", ["still going."]), false);
+  const theirs = turnWithBar(el("DIV", ["their finished answer."]), true);
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [userTurn("MARKER-1"), ours, userTurn("their q"), theirs],
+    body: {},
+  };
+  assert.strictEqual(CGPT.state("MARKER-1").actionBar, false);
+});
+
+test("state reports no action bar when our prompt has no reply yet", () => {
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [userTurn("MARKER-1")],
+    body: {},
+  };
+  const state = CGPT.state("MARKER-1");
+  assert.strictEqual(state.found, false);
+  assert.strictEqual(state.actionBar, false);
+});

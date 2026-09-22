@@ -18,6 +18,8 @@
     assistantMessage: '[data-message-author-role="assistant"]',
     fileInput: 'input#upload-files, input[type="file"]:not([accept*="image"])',
     markdownBody: ".markdown, .prose",
+    copyTurnButton:
+      'button[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label="Sao chép"]',
   };
 
   // --- DOM -> Markdown -----------------------------------------------------
@@ -343,6 +345,12 @@
       found: !!hit,
       isLast: hit ? hit.isLast : false,
       streaming: !!document.querySelector(SELECTORS.stopButton),
+      // The action bar under OUR turn - the same one pickReply selected - is
+      // the real end-of-message signal. Only that turn is queried, so a later
+      // turn carrying its own bar cannot make our unfinished reply look done.
+      actionBar: hit
+        ? !!nodes[hit.index].querySelector(SELECTORS.copyTurnButton)
+        : false,
       text: body ? body.textContent || "" : "",
       markdown: body ? toMarkdown(body) : "",
     };

@@ -122,63 +122,141 @@ class IsChatgptUrlTest(unittest.TestCase):
 
 
 class StabilityTrackerTest(unittest.TestCase):
-    """Completion needs our reply to exist and to have stopped growing.
+    """Completion needs our reply to exist, to have stopped growing, AND to
+    show the action bar ChatGPT renders once a message is complete.
 
     `streaming` is a page-wide signal, so it only counts against us while our
     reply is still the newest one - otherwise a second CLI run streaming into
     the same tab would keep us waiting forever.
     """
 
-    def tracker(self):
-        return cgpt.StabilityTracker(stable_polls=2)
+    def tracker(self, **over):
+        kwargs = dict(stable_polls=2, settle_seconds=10.0, fallback_seconds=60.0)
+        kwargs.update(over)
+        return cgpt.StabilityTracker(**kwargs)
 
-    def settle(self, tracker, text, found=True, streaming=False, is_last=True):
-        return tracker.update(found=found, streaming=streaming, is_last=is_last, text=text)
+    def settle(self, tracker, text, found=True, streaming=False, is_last=True,
+               action_bar=True, now=None):
+        return tracker.update(found=found, streaming=streaming, is_last=is_last,
+                              text=text, action_bar=action_bar, now=now)
 
     def test_not_done_while_our_reply_is_still_streaming(self):
         t = self.tracker()
-        self.assertFalse(self.settle(t, "partial", streaming=True))
-        self.assertFalse(self.settle(t, "partial", streaming=True))
+        self.assertIsNone(self.settle(t, "partial", streaming=True))
+        self.assertIsNone(self.settle(t, "partial", streaming=True))
 
     def test_not_done_before_our_reply_appears(self):
         t = self.tracker()
-        self.assertFalse(self.settle(t, "", found=False))
-        self.assertFalse(self.settle(t, "", found=False))
+        self.assertIsNone(self.settle(t, "", found=False))
+        self.assertIsNone(self.settle(t, "", found=False))
 
     def test_not_done_on_first_stable_observation(self):
         t = self.tracker()
         self.settle(t, "answer")
-        self.assertFalse(self.settle(t, "answer"))
+        self.assertIsNone(self.settle(t, "answer"))
 
-    def test_done_after_two_consecutive_identical_texts(self):
-        t = self.tracker()
-        self.settle(t, "answer")
-        self.settle(t, "answer")
-        self.assertTrue(self.settle(t, "answer"))
+    def test_done_only_after_the_settle_window_passes(self):
+        # The action bar is up and the text is stable: the reply still has to
+        # survive the settle re-read before it is handed back.
+        t = self.tracker(settle_seconds=10.0)
+        base = 1000.0
+        self.settle(t, "answer", now=base)
+        self.settle(t, "answer", now=base + 1)
+        self.assertIsNone(self.settle(t, "answer", now=base + 2))
+        self.assertIsNone(self.settle(t, "answer", now=base + 9))
+        self.assertEqual(self.settle(t, "answer", now=base + 13), "finished")
 
     def test_growing_text_resets_stability(self):
         t = self.tracker()
-        self.settle(t, "ans")
-        self.settle(t, "ans")
-        self.settle(t, "answer")
-        self.assertFalse(self.settle(t, "answer"))
+        base = 1000.0
+        self.settle(t, "ans", now=base)
+        self.settle(t, "ans", now=base + 1)
+        self.settle(t, "answer", now=base + 2)
+        self.assertIsNone(self.settle(t, "answer", now=base + 3))
 
     def test_never_completes_on_empty_text(self):
         t = self.tracker()
         for _ in range(5):
-            self.assertFalse(self.settle(t, ""))
+            self.assertIsNone(self.settle(t, ""))
 
     def test_streaming_midway_resets_stability(self):
         t = self.tracker()
         self.settle(t, "answer")
         self.settle(t, "answer", streaming=True)
-        self.assertFalse(self.settle(t, "answer"))
+        self.assertIsNone(self.settle(t, "answer"))
 
     def test_someone_elses_reply_streaming_after_ours_does_not_block_us(self):
+        t = self.tracker(settle_seconds=1.0)
+        base = 1000.0
+        self.settle(t, "our finished answer", streaming=True, is_last=False, now=base)
+        self.settle(t, "our finished answer", streaming=True, is_last=False, now=base + 1)
+        self.assertIsNone(self.settle(t, "our finished answer", streaming=True,
+                                      is_last=False, now=base + 2))
+        self.assertEqual(self.settle(t, "our finished answer", streaming=True,
+                                     is_last=False, now=base + 4), "finished")
+
+    def test_stable_text_without_the_action_bar_is_not_finished(self):
+        # The bug: ChatGPT streams in bursts and the stop button is absent
+        # during the gaps. Stable text alone must not declare a reply done.
         t = self.tracker()
-        for _ in range(2):
-            self.settle(t, "our finished answer", streaming=True, is_last=False)
-        self.assertTrue(self.settle(t, "our finished answer", streaming=True, is_last=False))
+        base = 1000.0
+        for i in range(5):
+            self.assertIsNone(
+                self.settle(t, "half an answer", action_bar=False, now=base + i))
+
+    def test_text_growing_during_the_settle_resets_and_keeps_waiting(self):
+        # The action bar showed, then the answer grew while we were settling:
+        # the reply was not finished after all, so the tracker keeps waiting.
+        t = self.tracker(settle_seconds=10.0)
+        base = 1000.0
+        self.settle(t, "start", now=base)
+        self.settle(t, "start", now=base + 1)
+        self.assertIsNone(self.settle(t, "start", now=base + 2))
+        self.assertIsNone(self.settle(t, "start grew", now=base + 5))
+        # Stability reset, so the settle window restarts from the new text.
+        self.settle(t, "start grew", now=base + 11)
+        self.settle(t, "start grew", now=base + 12)
+        self.assertIsNone(self.settle(t, "start grew", now=base + 13))
+        self.assertEqual(self.settle(t, "start grew", now=base + 24), "finished")
+
+    def test_action_bar_disappearing_during_the_settle_keeps_waiting(self):
+        t = self.tracker(settle_seconds=10.0)
+        base = 1000.0
+        self.settle(t, "answer", now=base)
+        self.settle(t, "answer", now=base + 1)
+        self.assertIsNone(self.settle(t, "answer", now=base + 2))
+        # Bar vanishes mid-settle; this is not a finished message.
+        self.assertIsNone(self.settle(t, "answer", action_bar=False, now=base + 5))
+
+    def test_no_action_bar_accepted_after_the_fallback_with_a_warning(self):
+        t = self.tracker(settle_seconds=10.0, fallback_seconds=60.0)
+        base = 1000.0
+        stream = io.StringIO()
+        real, sys.stderr = sys.stderr, stream
+        try:
+            self.settle(t, "answer", action_bar=False, now=base)
+            self.settle(t, "answer", action_bar=False, now=base + 1)
+            self.assertIsNone(self.settle(t, "answer", action_bar=False, now=base + 2))
+            self.assertIsNone(self.settle(t, "answer", action_bar=False, now=base + 30))
+            self.assertEqual(
+                self.settle(t, "answer", action_bar=False, now=base + 63), "fallback")
+        finally:
+            sys.stderr = real
+        self.assertIn("action bar", stream.getvalue())
+
+    def test_fallback_does_not_fire_before_its_window(self):
+        t = self.tracker(fallback_seconds=60.0)
+        base = 1000.0
+        stream = io.StringIO()
+        real, sys.stderr = sys.stderr, stream
+        try:
+            self.settle(t, "answer", action_bar=False, now=base)
+            self.settle(t, "answer", action_bar=False, now=base + 1)
+            self.assertIsNone(self.settle(t, "answer", action_bar=False, now=base + 2))
+            self.assertIsNone(self.settle(t, "answer", action_bar=False, now=base + 59))
+        finally:
+            sys.stderr = real
+        self.assertEqual(stream.getvalue(), "")
 
 
 class ExplainErrorTest(unittest.TestCase):

@@ -109,8 +109,10 @@ def check_apple_events_js(tab):
         if message == cgpt.ENABLE_HINT:
             c.detail = message
             c.fix = "In Edge's menu bar: View > Developer >\nAllow JavaScript from Apple Events."
-        else:
+        elif message.startswith("AppleScript bridge failed:"):
             c.detail = "probe failed for an unclassified reason:\n" + message
+        else:
+            c.detail = message
     return c
 
 

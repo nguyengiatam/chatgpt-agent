@@ -33,6 +33,14 @@ class CheckAppleEventsJsTest(unittest.TestCase):
         self.assertFalse(check.ok)
         self.assertIn("Allow JavaScript from Apple Events", check.fix)
 
+    def test_classified_error_is_not_called_unclassified_and_offers_no_menu_fix(self):
+        error = doctor.cgpt.CliError(doctor.cgpt.AUTOMATION_HINT)
+        check = self._run(error)
+        self.assertFalse(check.ok)
+        self.assertNotIn("unclassified", check.detail)
+        self.assertIn(doctor.cgpt.AUTOMATION_HINT, check.detail)
+        self.assertNotIn("Allow JavaScript from Apple Events", check.fix)
+
 
 class CheckSignedInTest(unittest.TestCase):
     def test_detail_keeps_every_line_of_the_error(self):

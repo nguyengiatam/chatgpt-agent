@@ -125,6 +125,7 @@ def parse_tab_state(raw):
 # missing signal is waited for before accepting a stable reply anyway.
 SETTLE_SECONDS = 10.0
 ACTION_BAR_FALLBACK_SECONDS = 60.0
+THROTTLE_CHECK_SECONDS = 15.0
 
 
 class StabilityTracker:
@@ -601,13 +602,30 @@ def send(tab_id, prompt):
     raise CliError("Could not press Send (" + str(result.get("error")) + ").")
 
 
-def wait_for_reply(tab_id, marker, timeout, poll):
+def wait_for_reply(tab_id, marker, timeout, poll, warn=None):
     tracker = StabilityTracker()
     call = "CGPT.state(" + js_string(marker) + ")"
     deadline = time.time() + timeout
+    next_throttle_check = time.time() + THROTTLE_CHECK_SECONDS if warn else None
+    throttle_warned = False
     latest = {}
     while time.time() < deadline:
         time.sleep(poll)
+        if warn and time.time() >= next_throttle_check:
+            next_throttle_check = time.time() + THROTTLE_CHECK_SECONDS
+            try:
+                state = parse_tab_state(bridge("tab_state", tab_id))
+            except CliError:
+                state = None
+            if state is not None:
+                _window_id, _tab_count, active, minimized, _url = state
+                if (not active or minimized) and not throttle_warned:
+                    warn(
+                        "the run's tab is no longer the active tab of its window "
+                        "(or the window is minimised); Edge throttles background tabs, "
+                        "so replies may be slow. Bring that window forward to speed it up."
+                    )
+                    throttle_warned = True
         latest = eval_js(tab_id, call)
         if tracker.update(
             latest.get("found", False),
@@ -689,7 +707,7 @@ def main(argv=None):
         # attach to the same conversation during the answer window.
         current_url = eval_js(tab_id, "location.href")
         held.claim_conversation(claims.conversation_id(current_url))
-        reply = wait_for_reply(tab_id, marker, args.timeout, args.poll)
+        reply = wait_for_reply(tab_id, marker, args.timeout, args.poll, warn=_notify)
     except claims.ClaimBusy as exc:
         sys.stderr.write(str(exc) + "\n")
         return 1

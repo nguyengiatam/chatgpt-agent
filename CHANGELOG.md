@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+**A throttled run now says why instead of silently slowing down.** While waiting for a reply, the CLI checks every 15 seconds whether its run tab stopped being active or its run window was minimized, warns once through the run log/stderr, and never changes browser focus.
+
 **A `--resume` no longer stalls on a window it left behind.** Resuming used to drive the tab it had bound on a previous run, and that tab is a background tab in a small tool window that has long since fallen behind - Chromium throttles it, the Apple Event times out, and the run can spend its whole budget without landing a single edit. Every run now opens the conversation in a window of its own, the same shape a fresh run already drives reliably, and the old tool window is closed afterwards only once ownership is proved and the new window is up.
 
 **`doctor` stops blaming the Edge JavaScript setting for every bridge failure.** The menu-bar fix is attached only when the refusal is a genuine JavaScript denial; any other failure now says the probe could not be classified and prints the whole error, not just its first line.

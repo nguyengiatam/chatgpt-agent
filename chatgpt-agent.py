@@ -694,7 +694,7 @@ def recover_reply(tab_id, marker, poll, log):
         return None
     log("  checking whether the interrupted message already has a reply")
     try:
-        reply = cgpt.wait_for_reply(tab_id, marker, RECOVER_TIMEOUT, poll)
+        reply = cgpt.wait_for_reply(tab_id, marker, RECOVER_TIMEOUT, poll, warn=log)
         log("  found it - continuing without re-sending")
         return reply
     except cgpt.TabGone:
@@ -710,7 +710,7 @@ def wait_with_tab_recovery(tab_id, marker, url, held, args, recovery, log,
     timeout = args.timeout if first_timeout is None else first_timeout
     try:
         reply = attempt("wait", args.retries, log,
-                        lambda: cgpt.wait_for_reply(tab_id, marker, timeout, args.poll))
+                        lambda: cgpt.wait_for_reply(tab_id, marker, timeout, args.poll, warn=log))
         return reply, tab_id
     except cgpt.TabGone:
         if recovery.get("used"):
@@ -728,7 +728,7 @@ def wait_with_tab_recovery(tab_id, marker, url, held, args, recovery, log,
         try:
             reply = attempt("recover wait", args.retries, log,
                             lambda: cgpt.wait_for_reply(
-                                tab_id, marker, args.timeout, args.poll))
+                                tab_id, marker, args.timeout, args.poll, warn=log))
         except cgpt.TabGone:
             raise cgpt.CliError(
                 "The ChatGPT tab disappeared a second time during this run. "

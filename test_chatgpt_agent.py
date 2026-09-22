@@ -552,6 +552,61 @@ class AttemptTest(unittest.TestCase):
 
 
 
+class WaitWarningWiringTest(unittest.TestCase):
+    def setUp(self):
+        self.real_wait = agent.cgpt.wait_for_reply
+        self.real_rebind = agent._rebind_after_tab_gone
+
+    def tearDown(self):
+        agent.cgpt.wait_for_reply = self.real_wait
+        agent._rebind_after_tab_gone = self.real_rebind
+
+    def _args(self):
+        return argparse.Namespace(timeout=30, poll=1, retries=1)
+
+    def test_recover_reply_passes_the_run_log_as_warn(self):
+        seen = []
+        def log(line):
+            pass
+        def wait(tab_id, marker, timeout, poll, warn=None):
+            seen.append(warn)
+            return "answer"
+        agent.cgpt.wait_for_reply = wait
+        self.assertEqual(agent.recover_reply(11, "m", 1, log), "answer")
+        self.assertEqual(seen, [log])
+
+    def test_normal_wait_passes_the_run_log_as_warn(self):
+        seen = []
+        def log(line):
+            pass
+        def wait(tab_id, marker, timeout, poll, warn=None):
+            seen.append(warn)
+            return "answer"
+        agent.cgpt.wait_for_reply = wait
+        reply, tab_id = agent.wait_with_tab_recovery(
+            11, "m", "https://chatgpt.com/c/a", None, self._args(), {}, log)
+        self.assertEqual((reply, tab_id), ("answer", 11))
+        self.assertEqual(seen, [log])
+
+    def test_recovery_wait_passes_the_run_log_as_warn(self):
+        seen = []
+        calls = []
+        def log(line):
+            pass
+        def wait(tab_id, marker, timeout, poll, warn=None):
+            calls.append(tab_id)
+            seen.append(warn)
+            if len(calls) == 1:
+                raise agent.cgpt.TabGone("gone")
+            return "answer"
+        agent.cgpt.wait_for_reply = wait
+        agent._rebind_after_tab_gone = lambda *args: 22
+        reply, tab_id = agent.wait_with_tab_recovery(
+            11, "m", "https://chatgpt.com/c/a", None, self._args(), {}, log)
+        self.assertEqual((reply, tab_id), ("answer", 22))
+        self.assertEqual(seen, [log, log])
+
+
 class _FakeCgpt:
     """Just enough browser for the round loop: hand it the replies to give."""
 
@@ -583,7 +638,7 @@ class _FakeCgpt:
         self.sent.append(message)
         return "marker"
 
-    def wait_for_reply(self, tab_id, marker, timeout, poll):
+    def wait_for_reply(self, tab_id, marker, timeout, poll, warn=None):
         if not self.replies:
             raise AssertionError("the loop asked for more replies than the test gave it")
         return self.replies.pop(0)
@@ -833,11 +888,11 @@ class ClaimSpansTheRunTest(unittest.TestCase):
                     held.claim_tab(202)
                 return 202
 
-            def wait_for_reply(self, tab_id, marker, timeout, poll):
+            def wait_for_reply(self, tab_id, marker, timeout, poll, warn=None):
                 if not self.gone:
                     self.gone = True
                     raise self.TabGone("gone")
-                return _FakeCgpt.wait_for_reply(self, tab_id, marker, timeout, poll)
+                return _FakeCgpt.wait_for_reply(self, tab_id, marker, timeout, poll, warn=warn)
 
         agent.cgpt = Cgpt(["nothing to report."])
         args = argparse.Namespace(
@@ -856,12 +911,12 @@ class ClaimSpansTheRunTest(unittest.TestCase):
         outer = self
 
         class Cgpt(_FakeCgpt):
-            def wait_for_reply(self, tab_id, marker, timeout, poll):
+            def wait_for_reply(self, tab_id, marker, timeout, poll, warn=None):
                 # A run spends most of its life in here, and the gap between
                 # two rounds sits inside it. A per-call claim leaves the tab
                 # free at exactly this moment.
                 verdicts.append(outer._rival_verdict(101))
-                return _FakeCgpt.wait_for_reply(self, tab_id, marker, timeout, poll)
+                return _FakeCgpt.wait_for_reply(self, tab_id, marker, timeout, poll, warn=warn)
 
         agent.cgpt = Cgpt(["nothing to report."])
         args = argparse.Namespace(
@@ -1073,7 +1128,7 @@ class TabGoneRecoveryTest(unittest.TestCase):
             def send(self, tab_id, message):
                 self.sent.append((tab_id, message))
                 return "marker-1"
-            def wait_for_reply(self, tab_id, marker, timeout, poll):
+            def wait_for_reply(self, tab_id, marker, timeout, poll, warn=None):
                 self.wait_tabs.append(tab_id)
                 if self.vanishes_left > 0:
                     self.vanishes_left -= 1
@@ -1124,7 +1179,7 @@ class WaitRecoveryHelperTest(unittest.TestCase):
                 if held:
                     held.claim_tab(22)
                 return 22
-            def wait_for_reply(self, tab_id, marker, timeout, poll):
+            def wait_for_reply(self, tab_id, marker, timeout, poll, warn=None):
                 self.waits.append(tab_id)
                 raise self.TabGone("gone")
             def bridge(self, *args): return "ok"
@@ -1320,7 +1375,7 @@ class ToolWindowLifecycleTest(unittest.TestCase):
                 self.calls.append(("send", tab_id))
                 return "marker-1"
 
-            def wait_for_reply(self, tab_id, marker, timeout, poll):
+            def wait_for_reply(self, tab_id, marker, timeout, poll, warn=None):
                 self.calls.append(("wait", tab_id))
                 if never_replies:
                     raise self.TabGone("gone")

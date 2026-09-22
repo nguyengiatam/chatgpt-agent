@@ -205,30 +205,31 @@ checkpoint it is about to resume.
 
 ## Parallel runs
 
-Runs may execute in parallel. Each run owns its tab **and the conversation that
-tab shows** for the whole run. Conversation ownership is the important part:
-two tabs showing the same conversation still conflict. If a requested
-conversation is already owned, the contender fails immediately and names the
-holder; it never waits in a queue.
+Runs may execute in parallel. Each run works in its own small Edge window,
+parked and cascaded in a corner of the screen; `--resume` opens the saved
+conversation in a new run window instead of driving the old tab in place. On a
+normal finish the tool closes that window only if it can still prove the window
+is its own and contains only its run tab. Your existing tabs and windows are
+never sent into, navigated, resized, minimized, closed, or made active.
 
-A one-shot question is less strict about the tab itself. If its first candidate
-tab is claimed, it quietly tries another ChatGPT tab or opens one. If the
-conversation shown by a candidate is already claimed, that conflict is refused
-rather than routed around.
+Each run owns its tab **and the conversation that tab shows** for the whole run.
+Conversation ownership is the important part: two tabs showing the same
+conversation still conflict, and the contender fails immediately rather than
+waiting in a queue. Ownership is a kernel-held file lock, not a pid file, so the
+kernel releases it when the owning process exits even after Ctrl-C or `kill -9`;
+abandoned claim files are only bookkeeping for `--prune`.
 
-Ownership is a kernel-held file lock, not a pid file. When the owning process
-ends — cleanly, by Ctrl-C, or even by `kill -9` — the kernel releases the lock,
-so there is no stranded conversation and no ownership cleanup step to remember.
-Abandoned claim *files* are only bookkeeping and are what `--prune` reports.
+While a run is waiting for a reply it checks whether its tab is still the active
+tab of that window and whether the window has been minimized. If either is true
+it warns once that Edge may throttle the reply; it never steals focus back.
+Bring that run window forward to restore full speed.
 
-Parallelism still shares one Edge instance. Several tabs streaming at once are
-heavier on the machine than one, and the bridge enforces no concurrency limit.
-Also, a run cannot survive the machine sleeping longer than its `--timeout`:
-macOS can throttle a background tab hard enough that a reply freezes part-way.
-For long unattended runs, the mitigation in use is to wrap the invocation in
-`caffeinate -dimsu`. That keeps the display from sleeping, which is what
-usually triggers the lock - it cannot stop a lock you ask for by hand, and a
-run that outlives its `--timeout` while locked still dies.
+There is no concurrency limit. More simultaneous runs mean more Edge rendering,
+CPU and memory work, and a background or minimized run can be much slower. A run
+also cannot survive the machine sleeping longer than its `--timeout`; for long
+unattended work, wrap the invocation in `caffeinate -dimsu`. That prevents
+display sleep, but cannot prevent a lock you request by hand or extend the run's
+timeout.
 
 ## Troubleshooting
 

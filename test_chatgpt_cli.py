@@ -631,6 +631,97 @@ class MakeMarkerTest(unittest.TestCase):
         self.assertLess(len(cgpt.make_marker()), 20)
 
 
+class WaitForReplyThrottleWarningTest(unittest.TestCase):
+    class Clock:
+        def __init__(self):
+            self.now = 0.0
+
+        def time(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    def setUp(self):
+        self.real_time = cgpt.time
+        self.real_eval = cgpt.eval_js
+        self.real_bridge = cgpt.bridge
+        self.clock = self.Clock()
+        cgpt.time = self.clock
+        cgpt.eval_js = lambda tab_id, expression: {
+            "found": True,
+            "streaming": False,
+            "isLast": True,
+            "text": "answer",
+            "markdown": "answer",
+            "actionBar": True,
+        }
+
+    def tearDown(self):
+        cgpt.time = self.real_time
+        cgpt.eval_js = self.real_eval
+        cgpt.bridge = self.real_bridge
+
+    def test_inactive_tab_warns_once_even_across_more_checks(self):
+        checks = []
+        warnings = []
+        def bridge(*args):
+            checks.append(args)
+            return "9\t1\t0\t0\thttps://chatgpt.com/c/a"
+        def eval_js(tab_id, expression):
+            waiting = self.clock.now < 35
+            return {
+                "found": True,
+                "streaming": waiting,
+                "isLast": True,
+                "text": "answer",
+                "markdown": "answer",
+                "actionBar": not waiting,
+            }
+        cgpt.bridge = bridge
+        cgpt.eval_js = eval_js
+        reply = cgpt.wait_for_reply(42, "marker", 60, 5, warn=warnings.append)
+        self.assertEqual(reply, "answer")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("background", warnings[0])
+        self.assertGreaterEqual(len(checks), 3)
+        self.assertTrue(all(call == ("tab_state", 42) for call in checks))
+
+    def test_minimized_window_warns(self):
+        warnings = []
+        cgpt.bridge = lambda *args: "9\t1\t1\t1\thttps://chatgpt.com/c/a"
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 60, 5, warn=warnings.append),
+                         "answer")
+        self.assertEqual(len(warnings), 1)
+
+    def test_active_unminimized_tab_does_not_warn(self):
+        warnings = []
+        cgpt.bridge = lambda *args: "9\t1\t1\t0\thttps://chatgpt.com/c/a"
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 60, 5, warn=warnings.append),
+                         "answer")
+        self.assertEqual(warnings, [])
+
+    def test_tab_state_error_is_only_diagnostic(self):
+        warnings = []
+        def bridge(*args):
+            raise cgpt.CliError("state unavailable")
+        cgpt.bridge = bridge
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 60, 5, warn=warnings.append),
+                         "answer")
+        self.assertEqual(warnings, [])
+
+    def test_unparseable_tab_state_is_only_diagnostic(self):
+        warnings = []
+        cgpt.bridge = lambda *args: "incomplete"
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 60, 5, warn=warnings.append),
+                         "answer")
+        self.assertEqual(warnings, [])
+
+    def test_without_warn_tab_state_is_never_read(self):
+        cgpt.bridge = lambda *args: (_ for _ in ()).throw(AssertionError(args))
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 60, 5), "answer")
+
+
 class MainWiringTest(unittest.TestCase):
     """main() must pass the browser plumbing whatever ensure_tab hands back.
 
@@ -660,8 +751,9 @@ class MainWiringTest(unittest.TestCase):
             calls["send"] = (tab_id, text)
             return "[c2c:deadbeef]"
 
-        def wait_for_reply(tab_id, marker, timeout, poll):
+        def wait_for_reply(tab_id, marker, timeout, poll, warn=None):
             calls["wait_for_reply"] = (tab_id, marker)
+            calls["wait_warn"] = warn
             return "the answer"
 
         patched = {
@@ -695,6 +787,10 @@ class MainWiringTest(unittest.TestCase):
     def test_no_bridge_call_when_focus_is_not_asked_for(self):
         _, calls = self._run_main()
         self.assertNotIn("bridge", calls)
+
+    def test_main_wires_stderr_warning_callback(self):
+        _, calls = self._run_main()
+        self.assertIs(calls["wait_warn"], cgpt._notify)
 
 class OneShotConversationSelectionTest(unittest.TestCase):
     def test_claimed_conversation_fails_immediately_and_names_holder(self):
@@ -750,7 +846,7 @@ class OneShotPostSendConversationClaimTest(unittest.TestCase):
             return {"ok": True}
         cgpt.eval_js = eval_js
         cgpt.send = lambda tab_id, text: "[c2c:marker]"
-        def wait_for_reply(tab_id, marker, timeout, poll):
+        def wait_for_reply(tab_id, marker, timeout, poll, warn=None):
             self.assertIn(("claim_conversation", "newly-created"), events)
             return "OK"
         cgpt.wait_for_reply = wait_for_reply

@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "chatgpt-agent",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Delegate review, planning, implementation and questions to the ChatGPT web UI from Kiro CLI using the existing ChatGPT Agent runtime.",
   "author": { "name": "Nguyen Gia Tam" },
   "homepage": "https://github.com/nguyengiatam/chatgpt-agent",

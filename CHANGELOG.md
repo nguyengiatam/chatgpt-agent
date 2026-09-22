@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1
+
+**A reply is read only once ChatGPT says it is done.** The Copy / thumbs action
+bar that appears under a finished assistant message is now the positive
+end-of-message signal, and the reply is re-read ten seconds after that signal
+first shows before it is handed back. Earlier releases trusted the stop button
+plus two stable polls, but ChatGPT streams in bursts and the stop button is
+absent during the gaps, so an ordinary mid-stream pause could be read as the
+whole answer - the run then acted on half a reply.
+
+**A missing signal degrades to slow, not to a hang.** If the action bar never
+appears - a ChatGPT redesign, say - a reply that stays stable and unstreaming
+for sixty seconds is accepted anyway, with a warning that names why.
+
 ## 0.7.0
 
 **Every run gets its own small Edge window, and never borrows yours.** A run

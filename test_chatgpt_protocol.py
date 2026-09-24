@@ -345,9 +345,6 @@ class UntaggedRequestTest(unittest.TestCase):
         )
         self.assertEqual(proto.extract_ops(reply), [{"op": "read", "path": "second"}])
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class PageErrorTest(unittest.TestCase):
     """A notice the page renders instead of an answer is not an answer.
@@ -381,3 +378,7 @@ class PageErrorTest(unittest.TestCase):
                  "'Something went wrong' in place of a reply. " + "x" * 400)
         self.assertGreater(len(reply), proto.PAGE_ERROR_CHARS)
         self.assertFalse(proto.is_page_error(reply))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -18,8 +18,11 @@
     assistantMessage: '[data-message-author-role="assistant"]',
     fileInput: 'input#upload-files, input[type="file"]:not([accept*="image"])',
     markdownBody: ".markdown, .prose",
-    copyTurnButton:
-      'button[data-testid="copy-turn-action-button"], button[aria-label="Copy"], button[aria-label="Sao chép"]',
+    // Only the test id: a code block carries its own aria-label="Copy" /
+    // "Sao chép" button, which once passed for the action bar.
+    copyTurnButton: 'button[data-testid="copy-turn-action-button"]',
+    // ChatGPT renders the action bar in this frame, outside the message node.
+    turnFrame: '[data-testid^="conversation-turn"], article',
   };
 
   // --- DOM -> Markdown -----------------------------------------------------
@@ -323,6 +326,13 @@
     return { ok: true, sent: true, carried: labelledWith(users[users.length - 1], name) };
   }
 
+  // The conversation-turn frame holding one message. The action bar lives here,
+  // not inside the message node; the frame holds one turn only, so a later
+  // turn's bar still cannot mark ours done.
+  function turnFrameOf(node) {
+    return (node.closest && node.closest(SELECTORS.turnFrame)) || node;
+  }
+
   // One poll sample: everything the Python side needs to decide "is it done?".
   function state(promptText) {
     var nodes = document.querySelectorAll("[data-message-author-role]");
@@ -349,7 +359,7 @@
       // the real end-of-message signal. Only that turn is queried, so a later
       // turn carrying its own bar cannot make our unfinished reply look done.
       actionBar: hit
-        ? !!nodes[hit.index].querySelector(SELECTORS.copyTurnButton)
+        ? !!turnFrameOf(nodes[hit.index]).querySelector(SELECTORS.copyTurnButton)
         : false,
       text: body ? body.textContent || "" : "",
       markdown: body ? toMarkdown(body) : "",

@@ -426,12 +426,32 @@ test("state reads the answer once the markdown body exists", () => {
 // under an assistant turn only once it is complete. The boolean must be about
 // OUR turn - the one pickReply selected - not the page at large.
 
-function turnWithBar(markdownBody, hasBar) {
+// Layout measured 2026-09-24: the turn's copy button sits in the
+// conversation-turn frame, two levels above the assistant node. Inside the
+// node the only copy button is a code block's own (aria-label "Copy"/"Sao
+// chép"), so a selector that matches it would call any code reply finished.
+function turnWithBar(markdownBody, hasBar, hasCodeBlock) {
+  // Matches the way a real querySelector would: any comma-separated part.
+  // The frame contains the node, so the code block's button is in it too.
+  const has = (sel, part) => sel.split(",").some((s) => s.trim() === part);
+  const inNode = (sel) =>
+    hasCodeBlock &&
+    (has(sel, 'button[aria-label="Copy"]') || has(sel, 'button[aria-label="Sao chép"]'))
+      ? {}
+      : null;
+  const frame = {
+    querySelector: (sel) =>
+      (hasBar && has(sel, 'button[data-testid="copy-turn-action-button"]') ? {} : null) ||
+      inNode(sel),
+  };
   return {
     getAttribute: (a) => (a === "data-message-author-role" ? "assistant" : null),
     textContent: "",
-    querySelector: (sel) =>
-      sel === CGPT.SELECTORS.copyTurnButton ? (hasBar ? {} : null) : markdownBody,
+    closest: (sel) => (sel === CGPT.SELECTORS.turnFrame ? frame : null),
+    querySelector: (sel) => {
+      if (sel === CGPT.SELECTORS.markdownBody) return markdownBody;
+      return inNode(sel);
+    },
   };
 }
 
@@ -465,6 +485,26 @@ test("a copy button in a different turn does not mark ours finished", () => {
     body: {},
   };
   assert.strictEqual(CGPT.state("MARKER-1").actionBar, false);
+});
+
+test("a code block's copy button is not the action bar", () => {
+  const body = el("DIV", ["```js"]);
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [userTurn("MARKER-1"), turnWithBar(body, false, true)],
+    body: {},
+  };
+  assert.strictEqual(CGPT.state("MARKER-1").actionBar, false);
+});
+
+test("the turn bar outside the message node marks a code reply finished", () => {
+  const body = el("DIV", ["```js"]);
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [userTurn("MARKER-1"), turnWithBar(body, true, true)],
+    body: {},
+  };
+  assert.strictEqual(CGPT.state("MARKER-1").actionBar, true);
 });
 
 test("state reports no action bar when our prompt has no reply yet", () => {

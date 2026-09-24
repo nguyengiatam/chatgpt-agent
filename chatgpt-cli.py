@@ -136,6 +136,9 @@ THROTTLE_CHECK_SECONDS = 15.0
 # long means the reply is lost, not slow. Without this a lost reply costs the
 # whole --timeout.
 NO_START_SECONDS = 60.0
+# How many times a fallback-accepted reply (no action bar) that still looks
+# half-drawn is waited on again before it is handed back as it is.
+RENDER_RECHECKS = 2
 
 
 class StabilityTracker:
@@ -619,6 +622,7 @@ def wait_for_reply(tab_id, marker, timeout, poll, warn=None):
     next_throttle_check = time.time() + THROTTLE_CHECK_SECONDS if warn else None
     throttle_warned = False
     started = False
+    rechecks = 0
     no_start_at = time.time() + NO_START_SECONDS
     latest = {}
     while time.time() < deadline:
@@ -646,17 +650,25 @@ def wait_for_reply(tab_id, marker, timeout, poll, warn=None):
                 + "s (no Stop button, no text): the response was lost.\n"
                 "A new conversation usually works where this one stays silent."
             )
-        if tracker.update(
+        verdict = tracker.update(
             latest.get("found", False),
             latest.get("streaming", False),
             latest.get("isLast", False),
             latest.get("text", ""),
             latest.get("actionBar", False),
-        ):
+        )
+        if verdict:
             markdown = latest.get("markdown", "")
-            # Settled text is not a settled message: the code block is still
-            # being rebuilt around it. Sampling here yields a truncated request.
-            if proto.is_still_rendering(markdown):
+            # Without the action bar, settled text is not a settled message:
+            # the code block may still be rebuilt around it, and sampling here
+            # yields a truncated request. With the action bar the message is
+            # done, so a c2c block that does not parse is the model's mistake -
+            # waiting on it only burns the timeout, while handing it back lets
+            # the loop ask for a corrected block. Measured 2026-09-24: an extra
+            # "}" in a finished reply held a run for the full 900s.
+            if (verdict == "fallback" and rechecks < RENDER_RECHECKS
+                    and proto.is_still_rendering(markdown)):
+                rechecks += 1
                 tracker.reset()
                 continue
             return markdown

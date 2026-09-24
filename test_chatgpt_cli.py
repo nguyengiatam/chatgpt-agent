@@ -747,6 +747,34 @@ class WaitForReplyThrottleWarningTest(unittest.TestCase):
         self._page(text_from=0)
         self.assertEqual(cgpt.wait_for_reply(42, "marker", 900, 5), "answer")
 
+    # --- a finished reply with a broken c2c block --------------------------
+
+    BROKEN = '```c2c\n{"ops":[{"op":"shell","timeout":15}}]}\n```'
+    FIXED = '```c2c\n{"ops":[{"op":"shell","timeout":15}]}\n```'
+
+    def _reply(self, bar, fixed_from=None):
+        def eval_js(tab_id, expression):
+            text = self.FIXED if fixed_from is not None and self.clock.now >= fixed_from else self.BROKEN
+            return {"found": True, "streaming": False, "isLast": True,
+                    "text": text, "markdown": text, "actionBar": bar}
+        cgpt.eval_js = eval_js
+
+    def test_a_finished_reply_with_a_broken_block_is_handed_back(self):
+        # The action bar says the model is done: the bad JSON is its mistake,
+        # and the loop must get it to ask for a correction, not sit out 900s.
+        self._reply(bar=True)
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 900, 5), self.BROKEN)
+        self.assertLess(self.clock.now, 60)
+
+    def test_without_the_action_bar_a_broken_block_is_waited_on(self):
+        self._reply(bar=False, fixed_from=100)
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 900, 5), self.FIXED)
+
+    def test_without_the_action_bar_the_wait_on_it_is_bounded(self):
+        self._reply(bar=False)
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 900, 5), self.BROKEN)
+        self.assertLess(self.clock.now, 400)
+
 
 class MainWiringTest(unittest.TestCase):
     """main() must pass the browser plumbing whatever ensure_tab hands back.

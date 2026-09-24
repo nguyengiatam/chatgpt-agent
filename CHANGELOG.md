@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1
+
+**A reply is recognised as finished again.** ChatGPT moved the turn's Copy button out of the assistant message into the surrounding conversation-turn frame, so the end-of-message signal from 0.7.1 was never seen. The old fallback selectors (`aria-label="Copy"` / `"Sao chép"`) matched a code block's own copy button instead: replies with code looked finished, and replies without code either waited out the 60-second fallback and were accepted truncated, or ran to the full timeout. The action bar is now looked up in our own turn's frame, by its test id only.
+
+**A reply that never starts no longer costs the whole timeout.** When ChatGPT loses a response - the message is posted and nothing ever begins - the wait now stops after 60 seconds with no Stop button and no text, and names the cause. The agent re-sends that message once in the same conversation; if it stays silent again the run stops and says to start a new run rather than `--resume`.
+
 ## 0.8.0
 
 **A throttled run now says why instead of silently slowing down.** While waiting for a reply, the CLI checks every 15 seconds whether its run tab stopped being active or its run window was minimized, warns once through the run log/stderr, and never changes browser focus.

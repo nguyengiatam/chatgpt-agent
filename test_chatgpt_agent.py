@@ -551,6 +551,19 @@ class AttemptTest(unittest.TestCase):
         self.assertTrue(any("retrying" in line for line in self.logged))
 
 
+    def test_a_reply_that_never_started_is_not_waited_for_again(self):
+        # The round loop re-sends it; a second wait on the same marker is
+        # another minute of the same silence.
+        calls = []
+
+        def action():
+            calls.append(1)
+            raise agent.cgpt.ReplyNotStarted("silent")
+
+        with self.assertRaises(agent.cgpt.ReplyNotStarted):
+            agent.attempt("wait", 3, self._log, action)
+        self.assertEqual(len(calls), 1)
+
 
 class WaitWarningWiringTest(unittest.TestCase):
     def setUp(self):
@@ -714,6 +727,46 @@ class MalformedBlockTest(unittest.TestCase):
         answer, _, _ = self._run([bad, good, bad, bad, "GO."])
         self.assertEqual(answer, "GO.")
 
+class ReplyNotStartedTest(MalformedBlockTest):
+    """A lost reply is re-sent once in the same conversation, then the run stops."""
+
+    def _run(self, replies):
+        class Silent(_FakeCgpt):
+            CliError = RuntimeError
+            TabGone = type("TabGone", (RuntimeError,), {})
+            ReplyNotStarted = type("ReplyNotStarted", (RuntimeError,), {})
+
+            def wait_for_reply(self, tab_id, marker, timeout, poll, warn=None):
+                reply = super().wait_for_reply(tab_id, marker, timeout, poll, warn)
+                if reply is None:
+                    raise self.ReplyNotStarted("ChatGPT did not start a reply")
+                return reply
+
+        agent.cgpt = Silent(replies)
+        lines = []
+        answer = agent.run(self._args(), lines.append, {})
+        return answer, lines, agent.cgpt.sent
+
+    def test_a_lost_reply_is_sent_again_once(self):
+        answer, lines, sent = self._run([None, "GO."])
+        self.assertEqual(answer, "GO.")
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sent[0], sent[1])
+        self.assertTrue(any("sending it again" in line for line in lines))
+
+    def test_two_silences_stop_the_run_and_point_at_a_new_run(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self._run([None, None])
+        self.assertIn("new run", str(caught.exception))
+        self.assertEqual(len(agent.cgpt.sent), 2)
+
+    def test_the_re_send_is_per_round(self):
+        good = '```c2c\n{"ops":[{"op":"read","path":"x"}]}\n```'
+        answer, _, sent = self._run([None, good, None, "GO."])
+        self.assertEqual(answer, "GO.")
+        self.assertEqual(len(sent), 4)
+
+
 
 class EmptyAnswerTest(unittest.TestCase):
     """An empty reply is not an answer - it must never be saved as the result."""
@@ -818,9 +871,6 @@ class HousekeepingTest(unittest.TestCase):
         self.assertNotIn("pruned", "\n".join(self.lines))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ClaimSpansTheRunTest(unittest.TestCase):
     """The tab claim must cover the whole run, not each browser call.
@@ -878,6 +928,7 @@ class ClaimSpansTheRunTest(unittest.TestCase):
         """
         class Cgpt(_FakeCgpt):
             TabGone = type("TabGone", (RuntimeError,), {})
+            ReplyNotStarted = type("ReplyNotStarted", (RuntimeError,), {})
 
             def __init__(self, replies):
                 _FakeCgpt.__init__(self, replies)
@@ -1100,6 +1151,7 @@ class TabGoneRecoveryTest(unittest.TestCase):
         class Browser:
             class CliError(RuntimeError): pass
             class TabGone(CliError): pass
+            class ReplyNotStarted(CliError): pass
             def __init__(self):
                 self.sent = []
                 self.wait_tabs = []
@@ -1173,6 +1225,7 @@ class WaitRecoveryHelperTest(unittest.TestCase):
         class Browser:
             class CliError(RuntimeError): pass
             class TabGone(CliError): pass
+            class ReplyNotStarted(CliError): pass
             def __init__(self):
                 self.waits = []
             def open_tab(self, url, timeout, held=None):
@@ -1346,6 +1399,7 @@ class ToolWindowLifecycleTest(unittest.TestCase):
         class Browser:
             class CliError(RuntimeError): pass
             class TabGone(CliError): pass
+            class ReplyNotStarted(CliError): pass
 
             def __init__(self):
                 self.calls = []
@@ -1442,3 +1496,7 @@ class ToolWindowLifecycleTest(unittest.TestCase):
             raise browser.CliError("Edge is not responding")
         browser.cleanup_window = refuse
         agent.finish_run("app", 202, {"url": "https://chatgpt.com/c/original"})
+
+
+if __name__ == "__main__":
+    unittest.main()

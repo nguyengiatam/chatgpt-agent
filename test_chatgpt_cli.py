@@ -386,9 +386,6 @@ class ReadPromptTest(unittest.TestCase):
         self.assertEqual(cgpt.read_prompt(["just", "this"], self.Stdin("   \n")), "just this")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 
 class NeedsAttachmentTest(unittest.TestCase):
     """Typing cost is quadratic in NEWLINES, not in characters.
@@ -720,6 +717,35 @@ class WaitForReplyThrottleWarningTest(unittest.TestCase):
     def test_without_warn_tab_state_is_never_read(self):
         cgpt.bridge = lambda *args: (_ for _ in ()).throw(AssertionError(args))
         self.assertEqual(cgpt.wait_for_reply(42, "marker", 60, 5), "answer")
+
+    # --- a reply that never starts (KNOWN-ISSUES #10) ----------------------
+
+    def _page(self, streaming_until=None, text_from=None):
+        def eval_js(tab_id, expression):
+            now = self.clock.now
+            text = "answer" if text_from is not None and now >= text_from else ""
+            return {
+                "found": True,
+                "streaming": streaming_until is not None and now < streaming_until,
+                "isLast": True, "text": text, "markdown": text, "actionBar": bool(text),
+            }
+        cgpt.eval_js = eval_js
+
+    def test_a_reply_that_never_starts_fails_fast_by_name(self):
+        self._page()
+        with self.assertRaises(cgpt.ReplyNotStarted):
+            cgpt.wait_for_reply(42, "marker", 900, 5)
+        self.assertLess(self.clock.now, cgpt.NO_START_SECONDS + 10)
+
+    def test_a_long_think_with_the_stop_button_is_not_lost(self):
+        # Thinking shows the Stop button and no text for minutes.
+        self._page(streaming_until=200, text_from=200)
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 900, 5), "answer")
+
+    def test_a_reply_that_is_already_there_is_not_lost(self):
+        # Never saw the Stop button - the reply was finished before the first poll.
+        self._page(text_from=0)
+        self.assertEqual(cgpt.wait_for_reply(42, "marker", 900, 5), "answer")
 
 
 class MainWiringTest(unittest.TestCase):
@@ -1211,3 +1237,7 @@ class WindowRegistryConcurrencyTest(unittest.TestCase):
             stored = json.load(handle)
         self.assertEqual(sorted(item["tab_id"] for item in stored),
                          [700 + i for i in range(12)])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

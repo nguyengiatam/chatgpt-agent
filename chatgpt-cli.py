@@ -57,6 +57,10 @@ class TabGone(CliError):
     """The stable Edge tab id no longer names any open tab."""
 
 
+class ReplyNotStarted(CliError):
+    """ChatGPT never began answering our message: no Stop button, no text."""
+
+
 # --- pure helpers (unit-tested in test_chatgpt_cli.py) ----------------------
 
 
@@ -126,6 +130,12 @@ def parse_tab_state(raw):
 SETTLE_SECONDS = 10.0
 ACTION_BAR_FALLBACK_SECONDS = 60.0
 THROTTLE_CHECK_SECONDS = 15.0
+# ChatGPT sometimes loses a response outright: the message is posted and no
+# reply ever starts. The Stop button appears as soon as generation begins,
+# thinking included, so never having seen it - and no text either - for this
+# long means the reply is lost, not slow. Without this a lost reply costs the
+# whole --timeout.
+NO_START_SECONDS = 60.0
 
 
 class StabilityTracker:
@@ -608,6 +618,8 @@ def wait_for_reply(tab_id, marker, timeout, poll, warn=None):
     deadline = time.time() + timeout
     next_throttle_check = time.time() + THROTTLE_CHECK_SECONDS if warn else None
     throttle_warned = False
+    started = False
+    no_start_at = time.time() + NO_START_SECONDS
     latest = {}
     while time.time() < deadline:
         time.sleep(poll)
@@ -627,6 +639,13 @@ def wait_for_reply(tab_id, marker, timeout, poll, warn=None):
                     )
                     throttle_warned = True
         latest = eval_js(tab_id, call)
+        started = started or bool(latest.get("streaming") or latest.get("text"))
+        if not started and time.time() >= no_start_at:
+            raise ReplyNotStarted(
+                "ChatGPT did not start a reply within " + str(int(NO_START_SECONDS))
+                + "s (no Stop button, no text): the response was lost.\n"
+                "A new conversation usually works where this one stays silent."
+            )
         if tracker.update(
             latest.get("found", False),
             latest.get("streaming", False),

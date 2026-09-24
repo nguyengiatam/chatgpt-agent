@@ -677,9 +677,11 @@ def attempt(label, tries, log, action):
     for number in range(1, tries + 1):
         try:
             return action()
-        except cgpt.TabGone:
+        except (cgpt.TabGone, cgpt.ReplyNotStarted):
             # Retrying the same stable id cannot revive a closed tab. More
             # importantly, retrying send here could duplicate an accepted turn.
+            # A reply that never started will not start on a second wait
+            # either; the round loop re-sends it instead.
             raise
         except cgpt.CliError as exc:
             if number >= tries:
@@ -896,21 +898,34 @@ def run(args, log, progress):
                 # deleting that conversation is what clears it.
                 log("  " + str(message.count("\n") + 1) + " lines is too wide to "
                     "type - sending as an attachment, which stays in the conversation")
-            marker = attempt("send", args.retries, log,
-                             lambda: cgpt.send(tab_id, message))
+            for resent in (False, True):
+                marker = attempt("send", args.retries, log,
+                                 lambda: cgpt.send(tab_id, message))
 
-            # A new chat gains its durable /c/<id> URL when the first turn lands.
-            # Capture it before waiting so a vanished tab can be reopened without
-            # guessing which conversation accepted the already-sent round.
-            track_conversation(tab_id, progress, held, args, log)
+                # A new chat gains its durable /c/<id> URL when the first turn
+                # lands. Capture it before waiting so a vanished tab can be
+                # reopened without guessing which conversation accepted the
+                # already-sent round.
+                track_conversation(tab_id, progress, held, args, log)
 
-            # Checkpoint before waiting: this is the window a crash lands in.
-            save_run(name, {
-                "url": progress.get("url"), "root": root, "round": round_number,
-                "spent": budget.spent, "pending_message": message, "marker": marker,
-            })
-            reply, tab_id = wait_with_tab_recovery(
-                tab_id, marker, progress.get("url"), held, args, recovery, log)
+                # Checkpoint before waiting: this is the window a crash lands in.
+                save_run(name, {
+                    "url": progress.get("url"), "root": root, "round": round_number,
+                    "spent": budget.spent, "pending_message": message, "marker": marker,
+                })
+                try:
+                    reply, tab_id = wait_with_tab_recovery(
+                        tab_id, marker, progress.get("url"), held, args, recovery, log)
+                    break
+                except cgpt.ReplyNotStarted as exc:
+                    # Once: at worst the thread holds the message twice. A
+                    # second silence is this conversation, not a hiccup.
+                    if resent:
+                        raise cgpt.CliError(
+                            str(exc) + " It stayed silent after one re-send too.\n"
+                            "Start a new run rather than --resume: resuming "
+                            "re-enters the same silent conversation.")
+                    log("  " + str(exc).split("\n")[0] + " - sending it again")
 
         track_conversation(tab_id, progress, held, args, log)
 

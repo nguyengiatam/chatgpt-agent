@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2
+
+**A finished reply with a malformed request is sent back for correction instead of waited on.** A c2c block that does not parse used to be read as a code block still being drawn, so the run kept waiting - even once the action bar had confirmed the message was complete. When the model itself wrote bad JSON (measured: one extra `}`), the run sat out the whole 900-second timeout and the model never saw the error. With the action bar present the reply is now handed back and the parse error goes to the model; the half-drawn-block guard applies only to replies accepted without the action bar, and at most twice.
+
 ## 0.8.1
 
 **A reply is recognised as finished again.** ChatGPT moved the turn's Copy button out of the assistant message into the surrounding conversation-turn frame, so the end-of-message signal from 0.7.1 was never seen. The old fallback selectors (`aria-label="Copy"` / `"Sao chép"`) matched a code block's own copy button instead: replies with code looked finished, and replies without code either waited out the 60-second fallback and were accepted truncated, or ran to the full timeout. The action bar is now looked up in our own turn's frame, by its test id only.

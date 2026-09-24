@@ -11,7 +11,7 @@
       "description": "Delegate review, planning and implementation to the ChatGPT web UI from Claude Code. Read-only by default; --allow-shell runs commands; --write lets it edit, test and commit. macOS and Microsoft Edge only.",
       "category": "development",
       "source": "./",
-      "version": "0.8.1",
+      "version": "0.8.2",
       "author": {
         "name": "Nguyễn Gia Tâm"
       },

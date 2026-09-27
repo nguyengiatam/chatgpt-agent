@@ -19,7 +19,9 @@
       'button[data-testid="send-button"], button[data-testid="composer-send-button"], button[aria-label*="Send"], form button[type="submit"]',
     stopButton: 'button[data-testid="stop-button"], button[aria-label*="Stop"], form button[aria-label="Ngừng"]',
     assistantMessage: '[data-message-author-role="assistant"], [data-content-search-unit-key$=":assistant"]',
-    userMessage: '[data-message-author-role="user"], [data-content-search-unit-key$=":user"]',
+    // The attachment tile sits in the outer wrapper, not in the inner
+    // [data-content-search-unit-key] unit, so match the wrapper key.
+    userMessage: '[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"]',
     // Only the "any file" input has no accept attribute; the old
     // :not([accept*="image"]) could match the images-only input.
     fileInput: 'input#upload-files, input[type="file"]:not([accept])',

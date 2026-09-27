@@ -552,12 +552,12 @@ test("state reads the answer from a data-content-search-unit-key turn", () => {
   assert.strictEqual(state.text, "GO - nothing found.");
 });
 
-test("sentWithAttachment finds the user turn by unit key", () => {
+test("sentWithAttachment finds the tile in the user turn's outer wrapper", () => {
   const users = [
     {
       getAttribute: (a) => {
         if (a === "data-message-author-role") return null;
-        if (a === "data-content-search-unit-key") return "fallback-turn-3:0:user";
+        if (a === "data-chatgpt-search-unit-key") return "fallback-turn-3:0:user";
         return null;
       },
       textContent: "prose",
@@ -566,7 +566,7 @@ test("sentWithAttachment finds the user turn by unit key", () => {
   ];
   global.document = {
     querySelector: () => null,
-    querySelectorAll: (sel) => (sel.indexOf("data-content-search-unit-key") !== -1 ? users : []),
+    querySelectorAll: (sel) => (sel.indexOf("data-chatgpt-search-unit-key") !== -1 ? users : []),
     body: {},
   };
   const state = CGPT.sentWithAttachment("c2c-abc.txt");

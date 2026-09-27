@@ -517,3 +517,159 @@ test("state reports no action bar when our prompt has no reply yet", () => {
   assert.strictEqual(state.found, false);
   assert.strictEqual(state.actionBar, false);
 });
+
+// --- state(): 2026-09-26 redesign, turns keyed by data-content-search-unit-key
+// The old-DOM path stays covered by "state reads the answer once the markdown
+// body exists" above (assistantTurn still carries data-message-author-role).
+
+function unitKeyTurn(role, text, body) {
+  return {
+    getAttribute: (a) => {
+      if (a === "data-message-author-role") return null;
+      if (a === "data-content-search-unit-key") return "fallback-turn-1:0:" + role;
+      return null;
+    },
+    textContent: text,
+    querySelector: (sel) => (sel === CGPT.SELECTORS.markdownBody ? body : null),
+    closest: () => null,
+  };
+}
+
+function unitKeyPage(nodes) {
+  // The fallback fires only when the author-role query is empty.
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: (sel) => (sel.indexOf("data-message-author-role") !== -1 ? [] : nodes),
+    body: {},
+  };
+}
+
+test("state reads the answer from a data-content-search-unit-key turn", () => {
+  const body = el("DIV", ["GO - nothing found."]);
+  unitKeyPage([unitKeyTurn("user", "MARKER-1", null), unitKeyTurn("assistant", "Bai viet GO", body)]);
+  const state = CGPT.state("MARKER-1");
+  assert.strictEqual(state.found, true);
+  assert.strictEqual(state.text, "GO - nothing found.");
+});
+
+test("sentWithAttachment finds the tile in the user turn's outer wrapper", () => {
+  const users = [
+    {
+      getAttribute: (a) => {
+        if (a === "data-message-author-role") return null;
+        if (a === "data-chatgpt-search-unit-key") return "fallback-turn-3:0:user";
+        return null;
+      },
+      textContent: "prose",
+      querySelectorAll: () => [{ getAttribute: (a) => (a === "aria-label" ? "c2c-abc.txt" : null) }],
+    },
+  ];
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: (sel) => (sel.indexOf("data-chatgpt-search-unit-key") !== -1 ? users : []),
+    body: {},
+  };
+  const state = CGPT.sentWithAttachment("c2c-abc.txt");
+  assert.strictEqual(state.sent, true);
+  assert.strictEqual(state.carried, true);
+});
+
+// --- attach(): the redesigned page consumes the file on change ----------
+// Measured: after `input.files = transfer.files` and the change dispatch, the
+// new page's handler consumes the file and EMPTIES input.files, while the chip
+// "c2c-xxxx.txt" does appear in the composer. Judging success by
+// input.files.length after the dispatch reported failure on a page that took
+// the file (3/3 live runs).
+
+// consume=true: the assignment sticks (the check sees 1) and the change
+// handler then empties files, as the redesigned page does.
+// consume=false: the setter ignores the assignment (the check sees 0).
+function fakeInput(consume) {
+  let files = { length: 0 };
+  return {
+    get files() {
+      return files;
+    },
+    set files(v) {
+      if (consume) files = v;
+    },
+    dispatchEvent: () => {
+      if (consume) files = { length: 0 };
+      return true;
+    },
+  };
+}
+
+function withFileInput(input) {
+  global.DataTransfer = function () {
+    this.items = { add: () => {} };
+    this.files = { length: 1 };
+  };
+  global.File = function () {};
+  global.Event = function () {};
+  global.document = { querySelector: () => input };
+  return input;
+}
+
+test("attach succeeds when the page consumes the file on change", () => {
+  withFileInput(fakeInput(true));
+  assert.strictEqual(CGPT.attach("data", "c2c-abc.txt").ok, true);
+});
+
+test("attach fails when the input ignores the file assignment", () => {
+  withFileInput(fakeInput(false));
+  const out = CGPT.attach("data", "c2c-abc.txt");
+  assert.strictEqual(out.ok, false);
+  assert.strictEqual(out.error, "files-not-set");
+});
+
+// --- state(): 2026-09-26 redesign action bar -------------------------------
+// No data-testid, no <article>. The reply's copy/regenerate bar is
+// div.turn-action-controls, a sibling block inside the exchange group that also
+// holds our assistant unit, three parents above it. turnFrameOf finds nothing
+// on this layout, so the walk from the assistant node is what finds the bar.
+
+function redesignedExchange(opts) {
+  opts = opts || {};
+  const body = el("DIV", ["done."]);
+  const assistant = {
+    getAttribute: (a) => (a === "data-message-author-role" ? "assistant" : null),
+    textContent: "",
+    closest: () => null,
+    querySelector: (sel) => (sel === CGPT.SELECTORS.markdownBody ? body : null),
+  };
+  const wrapper = () => ({ parentElement: null, querySelector: () => null, querySelectorAll: () => [] });
+  const w1 = wrapper();
+  const w2 = wrapper();
+  w2.parentElement = w1;
+  assistant.parentElement = w2;
+  const group = {
+    parentElement: null,
+    querySelector: (sel) => (opts.withBar && sel === CGPT.SELECTORS.actionBar ? {} : null),
+    querySelectorAll: (sel) =>
+      sel === CGPT.SELECTORS.assistantMessage ? (opts.twoTurns ? [{}, {}] : [{}]) : [],
+  };
+  w1.parentElement = group;
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: (sel) =>
+      sel.indexOf("data-message-author-role") !== -1 ? [userTurn("MARKER-1"), assistant] : [],
+    body: {},
+  };
+  return assistant;
+}
+
+test("redesign: an action bar in the exchange group marks our reply done", () => {
+  redesignedExchange({ withBar: true });
+  assert.strictEqual(CGPT.state("MARKER-1").actionBar, true);
+});
+
+test("redesign: no action bar in the group means not done", () => {
+  redesignedExchange({ withBar: false });
+  assert.strictEqual(CGPT.state("MARKER-1").actionBar, false);
+});
+
+test("redesign: an ancestor spanning a later turn's bar does not mark ours done", () => {
+  redesignedExchange({ withBar: true, twoTurns: true });
+  assert.strictEqual(CGPT.state("MARKER-1").actionBar, false);
+});

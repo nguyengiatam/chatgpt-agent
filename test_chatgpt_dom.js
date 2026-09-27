@@ -564,7 +564,11 @@ test("sentWithAttachment finds the user turn by unit key", () => {
       querySelectorAll: () => [{ getAttribute: (a) => (a === "aria-label" ? "c2c-abc.txt" : null) }],
     },
   ];
-  global.document = { querySelector: () => null, querySelectorAll: () => users, body: {} };
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: (sel) => (sel.indexOf("data-content-search-unit-key") !== -1 ? users : []),
+    body: {},
+  };
   const state = CGPT.sentWithAttachment("c2c-abc.txt");
   assert.strictEqual(state.sent, true);
   assert.strictEqual(state.carried, true);

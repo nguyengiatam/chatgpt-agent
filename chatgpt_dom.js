@@ -10,14 +10,20 @@
 
   // Everything version-fragile lives here. When ChatGPT ships a redesign,
   // this is the only block that should need touching.
+  // 2026-09-26: ChatGPT dropped the send/stop test ids, data-message-author-role
+  // and .markdown; new selectors are appended after the old ones so a page
+  // still serving the old DOM keeps working.
   var SELECTORS = {
     composer: '#prompt-textarea, form div[contenteditable="true"]',
     sendButton:
-      'button[data-testid="send-button"], button[data-testid="composer-send-button"], button[aria-label*="Send"]',
-    stopButton: 'button[data-testid="stop-button"], button[aria-label*="Stop"]',
-    assistantMessage: '[data-message-author-role="assistant"]',
-    fileInput: 'input#upload-files, input[type="file"]:not([accept*="image"])',
-    markdownBody: ".markdown, .prose",
+      'button[data-testid="send-button"], button[data-testid="composer-send-button"], button[aria-label*="Send"], form button[type="submit"]',
+    stopButton: 'button[data-testid="stop-button"], button[aria-label*="Stop"], form button[aria-label="Ngừng"]',
+    assistantMessage: '[data-message-author-role="assistant"], [data-content-search-unit-key$=":assistant"]',
+    userMessage: '[data-message-author-role="user"], [data-content-search-unit-key$=":user"]',
+    // Only the "any file" input has no accept attribute; the old
+    // :not([accept*="image"]) could match the images-only input.
+    fileInput: 'input#upload-files, input[type="file"]:not([accept])',
+    markdownBody: ".markdown, .prose, [data-markdown-text-style]",
     // Only the test id: a code block carries its own aria-label="Copy" /
     // "Sao chép" button, which once passed for the action bar.
     copyTurnButton: 'button[data-testid="copy-turn-action-button"]',
@@ -321,7 +327,7 @@
   // structure rather than the text keeps this independent of what ChatGPT
   // says, what language it says it in, and what we ourselves typed.
   function sentWithAttachment(name) {
-    var users = document.querySelectorAll('[data-message-author-role="user"]');
+    var users = document.querySelectorAll(SELECTORS.userMessage);
     if (!users.length) return { ok: true, sent: false, carried: false };
     return { ok: true, sent: true, carried: labelledWith(users[users.length - 1], name) };
   }
@@ -336,8 +342,14 @@
   // One poll sample: everything the Python side needs to decide "is it done?".
   function state(promptText) {
     var nodes = document.querySelectorAll("[data-message-author-role]");
+    if (!nodes.length) nodes = document.querySelectorAll("[data-content-search-unit-key]");
     var entries = Array.prototype.map.call(nodes, function (n) {
-      return { role: n.getAttribute("data-message-author-role"), text: n.textContent || "" };
+      var role = n.getAttribute("data-message-author-role");
+      if (!role) {
+        var key = n.getAttribute("data-content-search-unit-key") || "";
+        role = key.slice(key.lastIndexOf(":") + 1);
+      }
+      return { role: role, text: n.textContent || "" };
     });
     var hit = pickReply(entries, promptText);
     var body = null;

@@ -517,3 +517,55 @@ test("state reports no action bar when our prompt has no reply yet", () => {
   assert.strictEqual(state.found, false);
   assert.strictEqual(state.actionBar, false);
 });
+
+// --- state(): 2026-09-26 redesign, turns keyed by data-content-search-unit-key
+// The old-DOM path stays covered by "state reads the answer once the markdown
+// body exists" above (assistantTurn still carries data-message-author-role).
+
+function unitKeyTurn(role, text, body) {
+  return {
+    getAttribute: (a) => {
+      if (a === "data-message-author-role") return null;
+      if (a === "data-content-search-unit-key") return "fallback-turn-1:0:" + role;
+      return null;
+    },
+    textContent: text,
+    querySelector: (sel) => (sel === CGPT.SELECTORS.markdownBody ? body : null),
+    closest: () => null,
+  };
+}
+
+function unitKeyPage(nodes) {
+  // The fallback fires only when the author-role query is empty.
+  global.document = {
+    querySelector: () => null,
+    querySelectorAll: (sel) => (sel.indexOf("data-message-author-role") !== -1 ? [] : nodes),
+    body: {},
+  };
+}
+
+test("state reads the answer from a data-content-search-unit-key turn", () => {
+  const body = el("DIV", ["GO - nothing found."]);
+  unitKeyPage([unitKeyTurn("user", "MARKER-1", null), unitKeyTurn("assistant", "Bai viet GO", body)]);
+  const state = CGPT.state("MARKER-1");
+  assert.strictEqual(state.found, true);
+  assert.strictEqual(state.text, "GO - nothing found.");
+});
+
+test("sentWithAttachment finds the user turn by unit key", () => {
+  const users = [
+    {
+      getAttribute: (a) => {
+        if (a === "data-message-author-role") return null;
+        if (a === "data-content-search-unit-key") return "fallback-turn-3:0:user";
+        return null;
+      },
+      textContent: "prose",
+      querySelectorAll: () => [{ getAttribute: (a) => (a === "aria-label" ? "c2c-abc.txt" : null) }],
+    },
+  ];
+  global.document = { querySelector: () => null, querySelectorAll: () => users, body: {} };
+  const state = CGPT.sentWithAttachment("c2c-abc.txt");
+  assert.strictEqual(state.sent, true);
+  assert.strictEqual(state.carried, true);
+});

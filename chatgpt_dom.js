@@ -29,6 +29,10 @@
     copyTurnButton: 'button[data-testid="copy-turn-action-button"]',
     // ChatGPT renders the action bar in this frame, outside the message node.
     turnFrame: '[data-testid^="conversation-turn"], article',
+    // 2026-09-26 redesign: no test ids, no <article>. The reply's copy/regenerate
+    // bar is this sibling block inside the exchange group. Only class-based, so
+    // it cannot match a code block's own copy button.
+    actionBar: ".turn-action-controls",
   };
 
   // --- DOM -> Markdown -----------------------------------------------------
@@ -260,8 +264,11 @@
       var transfer = new DataTransfer();
       transfer.items.add(new File([content], name, { type: "text/plain" }));
       input.files = transfer.files;
+      if (input.files.length !== 1) return { ok: false, error: "files-not-set" };
+      // The redesigned page's change handler consumes the file and empties
+      // input.files, so success can only be judged here, before the dispatch.
       input.dispatchEvent(new Event("change", { bubbles: true }));
-      return { ok: input.files.length === 1, bytes: (content || "").length, error: null };
+      return { ok: true, bytes: (content || "").length, error: null };
     } catch (e) {
       return { ok: false, error: "attach-failed: " + e.message };
     }
@@ -339,6 +346,21 @@
     return (node.closest && node.closest(SELECTORS.turnFrame)) || node;
   }
 
+  // The redesigned page has no test ids and no <article>: the action bar is a
+  // sibling block inside the exchange group that also holds the user turn. So
+  // when the frame lookup misses, walk up from our assistant node and take the
+  // nearest ancestor carrying an action bar - but never one that already spans
+  // a later assistant turn, whose own bar would mark our unfinished reply done.
+  function actionBarAbove(node) {
+    for (var el = node, i = 0; el && i <= 6; i++, el = el.parentElement) {
+      if (el.querySelectorAll && el.querySelectorAll(SELECTORS.assistantMessage).length > 1) {
+        return false;
+      }
+      if (el.querySelector && el.querySelector(SELECTORS.actionBar)) return true;
+    }
+    return false;
+  }
+
   // One poll sample: everything the Python side needs to decide "is it done?".
   function state(promptText) {
     var nodes = document.querySelectorAll("[data-message-author-role]");
@@ -371,7 +393,8 @@
       // the real end-of-message signal. Only that turn is queried, so a later
       // turn carrying its own bar cannot make our unfinished reply look done.
       actionBar: hit
-        ? !!turnFrameOf(nodes[hit.index]).querySelector(SELECTORS.copyTurnButton)
+        ? !!turnFrameOf(nodes[hit.index]).querySelector(SELECTORS.copyTurnButton) ||
+          actionBarAbove(nodes[hit.index])
         : false,
       text: body ? body.textContent || "" : "",
       markdown: body ? toMarkdown(body) : "",

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3
+
+**Follows ChatGPT's 2026-09-26 redesign.** The page dropped the send/stop test ids, `data-message-author-role`, `.markdown`, `#upload-files`, the copy-turn test id and the `conversation-turn` frame. Send is now the form's submit button, stop a button labelled in the UI language, turns are read from `data-content-search-unit-key` (role from the key's suffix), prose from `[data-markdown-text-style]`, and the file input is the one without `accept`. The upload handler now empties `input.files` once it has taken the file, so an attach is judged before the change event and confirmed by the chip; the attachment tile is read from the user turn's outer `data-chatgpt-search-unit-key` wrapper; and the end-of-reply signal is the exchange's `.turn-action-controls` bar, never one that spans a later reply. The old selectors stay first. Live on Edge: a short ask returned in 20 s (was 73 s, waiting out the missing action bar) and a 250-line attached ask in 24 s (was refused outright).
+
 ## 0.8.2
 
 **A finished reply with a malformed request is sent back for correction instead of waited on.** A c2c block that does not parse used to be read as a code block still being drawn, so the run kept waiting - even once the action bar had confirmed the message was complete. When the model itself wrote bad JSON (measured: one extra `}`), the run sat out the whole 900-second timeout and the model never saw the error. With the action bar present the reply is now handed back and the parse error goes to the model; the half-drawn-block guard applies only to replies accepted without the action bar, and at most twice.
